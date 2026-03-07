@@ -39,6 +39,7 @@ live-2d/plugins/community/world-eye/
 ├── bm25-search.js
 ├── sub-agent.js
 ├── abbreviations.js
+├── plugin_config.json
 ├── config.example.json
 ├── generate_cache.js
 ├── show_cache.js
@@ -48,9 +49,15 @@ live-2d/plugins/community/world-eye/
 
 ## 配置
 
-首次启动会自动从 `config.example.json` 创建 `config.json`。
+### 方式一：通过 UI 配置（推荐）
 
-手动编辑 `config.json`：
+插件使用标准的 `plugin_config.json`，在肥牛.exe 的插件管理页面中点击「配置」按钮即可编辑所有配置项。
+
+### 方式二：手动编辑
+
+首次启动会自动从 `config.example.json` 创建 `plugin_config.json`。
+
+手动编辑 `plugin_config.json`：
 
 ```json
 {
