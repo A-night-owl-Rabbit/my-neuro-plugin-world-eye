@@ -272,6 +272,40 @@ class SubAgent {
     _removeToolCallText(content) {
         return content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
     }
+
+    /**
+     * 批量生成工具缩略词
+     * @param {Array<{name: string, description: string}>} tools
+     * @returns {Promise<Object<string, string>>} { toolName: abbreviation }
+     */
+    async generateAbbreviations(tools) {
+        if (!tools || tools.length === 0) return {};
+
+        const toolLines = tools.map(t => `- ${t.name}: ${t.description}`).join('\n');
+
+        const messages = [
+            {
+                role: 'system',
+                content: '你是工具缩略词生成专家。为每个工具生成一个精炼的中文缩略词（2-10个字），要求：\n1. 用最少的字概括工具的核心功能\n2. 使用"动词+对象"结构，如"搜索B站视频"、"生成图片"、"查询天气"\n3. 如果工具有多种用途，用/分隔，如"点赞/投币/收藏"\n4. 返回格式必须是 JSON 对象：{"工具名": "缩略词"}'
+            },
+            {
+                role: 'user',
+                content: `为以下 ${tools.length} 个工具生成缩略词：\n\n${toolLines}\n\n直接返回 JSON 对象，不要其他内容。`
+            }
+        ];
+
+        try {
+            const result = await this._callLLM(messages, []);
+            const text = (result.content || '').trim();
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                return JSON.parse(jsonMatch[0]);
+            }
+        } catch (error) {
+            logToTerminal('error', `🌍 [世界之眼] 缩略词生成失败: ${error.message}`);
+        }
+        return {};
+    }
 }
 
 module.exports = { SubAgent };
