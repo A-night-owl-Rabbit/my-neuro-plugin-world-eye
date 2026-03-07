@@ -11,20 +11,6 @@ const ABBREVIATION_MAP = {
     'web_search': 'Tavily快速搜索',
     'game_info_search': '游戏攻略/剧情检索',
 
-    // ===== 记忆系统 MemOS =====
-    'memos_search_memory': '搜索记忆',
-    'memos_add_memory': '添加记忆',
-    'memos_upload_image': '上传图片到记忆',
-    'memos_search_images': '搜索图片记忆',
-    'memos_save_screenshot': '截图保存到记忆',
-    'memos_save_image_from_file': '本地图片存入记忆',
-    'memos_record_tool_usage': '记录工具使用',
-    'memos_search_tool_usage': '搜索工具使用记录',
-    'memos_import_url': '导入网页到记忆',
-    'memos_import_document': '导入文档到记忆',
-    'memos_correct_memory': '修正/删除记忆',
-    'memos_get_preferences': '获取用户偏好',
-
     // ===== B站 =====
     'login_bilibili_by_qrcode': 'B站扫码登录',
     'search_bilibili_video': '搜索B站视频',
