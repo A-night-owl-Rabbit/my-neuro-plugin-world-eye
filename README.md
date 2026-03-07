@@ -29,6 +29,8 @@
 
 ## 安装
 
+### 1. 复制插件文件
+
 将整个目录复制到 `live-2d/plugins/community/world-eye/`：
 
 ```
@@ -46,6 +48,18 @@ live-2d/plugins/community/world-eye/
 ├── .gitignore
 └── test_*.js
 ```
+
+### 2. 替换 llm-handler.js（必须）
+
+本插件需要修改主项目的 `llm-handler.js` 才能正常工作。仓库中的 `patches/llm-handler.js` 是修改后的完整文件。
+
+将 `patches/llm-handler.js` 复制并覆盖到：
+
+```
+live-2d/js/ai/llm-handler.js
+```
+
+> **核心改动**：在工具调用循环中，每次迭代从原始完整工具列表重新开始，确保 World Eye 的 `onLLMRequest` 钩子每次都能正确接收到全部工具进行分流。
 
 ## 配置
 
@@ -137,26 +151,34 @@ node test_goodnight.js  # 场景测试：用户说晚安
 - 停用词过滤（中英文）
 - 精确匹配加分
 
-### 对 llm-handler.js 的修改
+### llm-handler.js 修改详情
 
-插件需要配合主项目 `llm-handler.js` 的一处修改才能正常工作：
-
-在工具调用循环中，每次迭代需要从原始完整工具列表重新开始，避免上轮 World Eye 替换后丢失工具：
+`patches/llm-handler.js` 中的核心改动（相对于原版 my-neuro-main）：
 
 ```javascript
+// 原版：
+const allTools = getMergedToolsList();
+
+// 修改后：
 const originalAllTools = getMergedToolsList();
 let allTools = originalAllTools;
 
 while (iteration < maxIterations) {
-    allTools = [...originalAllTools]; // 每次迭代重置
+    // 每次迭代从原始列表重新开始
+    allTools = [...originalAllTools];
     if (global.pluginManager) {
         const hookRequest = { messages: messagesForAPI, tools: allTools };
         await global.pluginManager.runLLMRequestHooks(hookRequest).catch(() => {});
-        allTools = hookRequest.tools;
+        allTools = hookRequest.tools; // 采用插件修改后的工具列表
     }
     // ...
 }
 ```
+
+这确保了：
+1. World Eye 的 `onLLMRequest` 每次都收到**完整的原始工具列表**
+2. 插件能正确将 server-tools/MCP 工具替换为元工具，同时透传其他插件工具
+3. 连续工具调用时不会因上轮替换而丢失工具定义
 
 ## 许可
 
