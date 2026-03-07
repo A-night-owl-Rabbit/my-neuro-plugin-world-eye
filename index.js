@@ -5,9 +5,6 @@ const { Plugin } = require('../../../js/core/plugin-base.js');
 const { logToTerminal } = require('../../../js/api-utils.js');
 const { ToolRegistry } = require('./tool-registry.js');
 const { SubAgent } = require('./sub-agent.js');
-const fs = require('fs');
-const path = require('path');
-
 const PLUGIN_TAG = '🌍 [世界之眼]';
 
 class WorldEyePlugin extends Plugin {
@@ -276,27 +273,16 @@ class WorldEyePlugin extends Plugin {
     // ===== 配置 =====
 
     _loadConfig() {
-        // 主应用配置：优先使用 PluginContext 传入的全局 config
-        this._config = this.context?._config || null;
-
-        // 读取插件专属配置
-        const pluginConfigPath = path.join(this._pluginDir, 'plugin_config.json');
-        const exampleConfigPath = path.join(this._pluginDir, 'config.example.json');
+        this._config = this.context?.getConfig?.() || this.context?._config || null;
 
         try {
-            if (fs.existsSync(pluginConfigPath)) {
-                this._pluginConfig = JSON.parse(fs.readFileSync(pluginConfigPath, 'utf8'));
-            } else if (fs.existsSync(exampleConfigPath)) {
-                const example = fs.readFileSync(exampleConfigPath, 'utf8');
-                fs.writeFileSync(pluginConfigPath, example, 'utf8');
-                this._pluginConfig = JSON.parse(example);
-                logToTerminal('info', `${PLUGIN_TAG} 已从 config.example.json 创建默认配置`);
-            }
+            const cfg = this.context.getPluginConfig();
+            this._pluginConfig = { enabled: true, search_top_k: 5, cache_ttl_seconds: 300, ...cfg };
         } catch {
-            this._pluginConfig = { enabled: true };
+            this._pluginConfig = { enabled: true, search_top_k: 5, cache_ttl_seconds: 300 };
         }
 
-        this._cacheTTL = (this._pluginConfig?.cache_ttl_seconds || 300) * 1000;
+        this._cacheTTL = (this._pluginConfig.cache_ttl_seconds || 300) * 1000;
     }
 
     _getTopK() {
