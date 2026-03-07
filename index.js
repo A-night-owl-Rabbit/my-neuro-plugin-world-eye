@@ -71,6 +71,7 @@ class WorldEyePlugin extends Plugin {
         const changed = this._registry.buildFromToolsList(managedTools);
         if (changed) {
             logToTerminal('info', `${PLUGIN_TAG} 工具索引已更新，当前 ${this._registry.size} 个工具（另有 ${passthroughTools.length} 个插件工具直接透传）`);
+            this._refineAbbreviationsAsync();
         }
 
         this._lastOriginalTools = [...incomingTools];
@@ -294,6 +295,25 @@ class WorldEyePlugin extends Plugin {
             const appConfig = this._config || {};
             this._subAgent = new SubAgent(appConfig, this._pluginConfig || {});
         }
+    }
+
+    /**
+     * 异步精炼缩略词：检查是否有新工具缺少人工缩略词，用 LLM 生成
+     * 不阻塞主流程，后台静默执行
+     */
+    _refineAbbreviationsAsync() {
+        const needRefine = this._registry.getToolsNeedingRefinement();
+        if (needRefine.length === 0) return;
+
+        logToTerminal('info', `${PLUGIN_TAG} 发现 ${needRefine.length} 个工具缺少缩略词，后台生成中...`);
+
+        this._ensureSubAgent();
+        this._subAgent.generateAbbreviations(needRefine).then(abbrMap => {
+            const count = this._registry.updateAbbreviations(abbrMap);
+            if (count > 0) {
+                logToTerminal('info', `${PLUGIN_TAG} 已为 ${count} 个工具生成缩略词并缓存`);
+            }
+        }).catch(() => {});
     }
 }
 
