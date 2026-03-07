@@ -280,7 +280,7 @@ class WorldEyePlugin extends Plugin {
         this._config = this.context?._config || null;
 
         // 读取插件专属配置
-        const pluginConfigPath = path.join(this._pluginDir, 'config.json');
+        const pluginConfigPath = path.join(this._pluginDir, 'plugin_config.json');
         const exampleConfigPath = path.join(this._pluginDir, 'config.example.json');
 
         try {
