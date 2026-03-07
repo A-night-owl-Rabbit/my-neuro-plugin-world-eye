@@ -1,0 +1,9 @@
+{
+  "name": "world-eye",
+  "displayName": "世界之眼",
+  "version": "1.0.0",
+  "author": "LikeNightRabbit",
+  "description": "工具搜索与智能路由插件：自动发现所有工具、BM25 检索工具定义、下级智能体委派执行，实现大规模工具库的高效调用",
+  "main": "index.js",
+  "lang": "js"
+}

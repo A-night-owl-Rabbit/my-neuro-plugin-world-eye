@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "search_top_k": 5,
+  "sub_agent": {
+    "use_separate_model": false,
+    "api_key": "",
+    "api_url": "",
+    "model": "",
+    "max_iterations": 5,
+    "temperature": 0.3
+  },
+  "cache_ttl_seconds": 300
+}
