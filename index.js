@@ -5,9 +5,6 @@ const { Plugin } = require('../../../js/core/plugin-base.js');
 const { logToTerminal } = require('../../../js/api-utils.js');
 const { ToolRegistry } = require('./tool-registry.js');
 const { SubAgent } = require('./sub-agent.js');
-const fs = require('fs');
-const path = require('path');
-
 const PLUGIN_TAG = '🌍 [世界之眼]';
 
 class WorldEyePlugin extends Plugin {
@@ -32,17 +29,23 @@ class WorldEyePlugin extends Plugin {
     }
 
     async onStart() {
-        this._discoverTools();
+        const tools = this._collectFreshTools();
+        if (tools.length > 0) {
+            this._registry.buildFromToolsList(tools);
+        }
         logToTerminal('info', `${PLUGIN_TAG} 已发现 ${this._registry.size} 个工具，索引构建完成`);
     }
 
     /**
      * 核心钩子：拦截 LLM 请求，替换工具列表
+     * 兼容原版 llm-handler.js，无需修改主项目任何文件
      */
     async onLLMRequest(request) {
         if (!this._pluginConfig || !this._pluginConfig.enabled) return;
 
-        const incomingTools = request.tools || [];
+        // 始终从全局管理器获取完整工具列表
+        // 不依赖 request.tools（多轮迭代中可能是上轮修改后的残留）
+        const freshTools = this._collectFreshTools();
 
         // 识别插件工具（由 pluginManager 提供），这些不归世界之眼管
         const pluginToolNames = new Set();
@@ -61,7 +64,7 @@ class WorldEyePlugin extends Plugin {
         // 分流：server-tools/MCP → 世界之眼管理 | 插件工具 → 直接透传
         const managedTools = [];
         const passthroughTools = [];
-        for (const t of incomingTools) {
+        for (const t of freshTools) {
             const name = (t.function || t).name || '';
             if (name.startsWith('world_eye_')) continue;
             if (pluginToolNames.has(name)) {
@@ -74,12 +77,18 @@ class WorldEyePlugin extends Plugin {
         const changed = this._registry.buildFromToolsList(managedTools);
         if (changed) {
             logToTerminal('info', `${PLUGIN_TAG} 工具索引已更新，当前 ${this._registry.size} 个工具（另有 ${passthroughTools.length} 个插件工具直接透传）`);
+            this._refineAbbreviationsAsync();
         }
 
-        this._lastOriginalTools = [...incomingTools];
-
-        // 最终工具列表：世界之眼元工具 + 插件工具（透传）
-        request.tools = [...this._buildMetaTools(), ...passthroughTools];
+        // 原地修改数组，使修改在原版 llm-handler.js 中生效
+        // （request.tools 与 llm-handler 中的 allTools 指向同一个数组对象）
+        const newTools = [...this._buildMetaTools(), ...passthroughTools];
+        if (Array.isArray(request.tools)) {
+            request.tools.length = 0;
+            request.tools.push(...newTools);
+        } else {
+            request.tools = newTools;
+        }
     }
 
     /**
@@ -222,38 +231,30 @@ class WorldEyePlugin extends Plugin {
         ];
     }
 
-    // ===== 工具发现 =====
+    // ===== 工具收集 =====
 
-    _discoverTools() {
-        let allTools = [];
-
-        // 从全局工具管理器收集
+    /**
+     * 从全局管理器收集所有工具（server-tools + MCP + 插件工具）
+     * 每次调用都返回最新的完整列表，不依赖缓存
+     */
+    _collectFreshTools() {
+        const tools = [];
         if (global.localToolManager && global.localToolManager.isEnabled) {
-            try {
-                allTools.push(...global.localToolManager.getToolsForLLM());
-            } catch { /* skip */ }
+            try { tools.push(...global.localToolManager.getToolsForLLM()); } catch { /* skip */ }
         }
         if (global.mcpManager && global.mcpManager.isEnabled) {
-            try {
-                allTools.push(...global.mcpManager.getToolsForLLM());
-            } catch { /* skip */ }
+            try { tools.push(...global.mcpManager.getToolsForLLM()); } catch { /* skip */ }
         }
         if (global.pluginManager) {
             try {
                 const pluginTools = global.pluginManager.getAllTools();
-                // 过滤掉世界之眼自己的工具，避免递归
-                const filtered = pluginTools.filter(t => {
+                for (const t of pluginTools) {
                     const name = (t.function || t).name || '';
-                    return !name.startsWith('world_eye_');
-                });
-                allTools.push(...filtered);
+                    if (!name.startsWith('world_eye_')) tools.push(t);
+                }
             } catch { /* skip */ }
         }
-
-        const changed = this._registry.buildFromToolsList(allTools);
-        if (changed) {
-            logToTerminal('info', `${PLUGIN_TAG} 工具索引已更新，当前 ${this._registry.size} 个工具`);
-        }
+        return tools;
     }
 
     // ===== 缓存管理 =====
@@ -276,27 +277,16 @@ class WorldEyePlugin extends Plugin {
     // ===== 配置 =====
 
     _loadConfig() {
-        // 主应用配置：优先使用 PluginContext 传入的全局 config
-        this._config = this.context?._config || null;
-
-        // 读取插件专属配置
-        const pluginConfigPath = path.join(this._pluginDir, 'config.json');
-        const exampleConfigPath = path.join(this._pluginDir, 'config.example.json');
+        this._config = this.context?.getConfig?.() || this.context?._config || null;
 
         try {
-            if (fs.existsSync(pluginConfigPath)) {
-                this._pluginConfig = JSON.parse(fs.readFileSync(pluginConfigPath, 'utf8'));
-            } else if (fs.existsSync(exampleConfigPath)) {
-                const example = fs.readFileSync(exampleConfigPath, 'utf8');
-                fs.writeFileSync(pluginConfigPath, example, 'utf8');
-                this._pluginConfig = JSON.parse(example);
-                logToTerminal('info', `${PLUGIN_TAG} 已从 config.example.json 创建默认配置`);
-            }
+            const cfg = this.context.getPluginConfig();
+            this._pluginConfig = { enabled: true, search_top_k: 5, cache_ttl_seconds: 300, ...cfg };
         } catch {
-            this._pluginConfig = { enabled: true };
+            this._pluginConfig = { enabled: true, search_top_k: 5, cache_ttl_seconds: 300 };
         }
 
-        this._cacheTTL = (this._pluginConfig?.cache_ttl_seconds || 300) * 1000;
+        this._cacheTTL = (this._pluginConfig.cache_ttl_seconds || 300) * 1000;
     }
 
     _getTopK() {
@@ -308,6 +298,25 @@ class WorldEyePlugin extends Plugin {
             const appConfig = this._config || {};
             this._subAgent = new SubAgent(appConfig, this._pluginConfig || {});
         }
+    }
+
+    /**
+     * 异步精炼缩略词：检查是否有新工具缺少人工缩略词，用 LLM 生成
+     * 不阻塞主流程，后台静默执行
+     */
+    _refineAbbreviationsAsync() {
+        const needRefine = this._registry.getToolsNeedingRefinement();
+        if (needRefine.length === 0) return;
+
+        logToTerminal('info', `${PLUGIN_TAG} 发现 ${needRefine.length} 个工具缺少缩略词，后台生成中...`);
+
+        this._ensureSubAgent();
+        this._subAgent.generateAbbreviations(needRefine).then(abbrMap => {
+            const count = this._registry.updateAbbreviations(abbrMap);
+            if (count > 0) {
+                logToTerminal('info', `${PLUGIN_TAG} 已为 ${count} 个工具生成缩略词并缓存`);
+            }
+        }).catch(() => {});
     }
 }
 
