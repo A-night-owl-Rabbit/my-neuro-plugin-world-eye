@@ -9,7 +9,6 @@ const ABBREVIATION_MAP = {
     'duckduckgo_search': 'DuckDuckGo隐私搜索',
     'scholar_search': '学术论文搜索',
     'web_search': 'Tavily快速搜索',
-    'game_info_search': '游戏攻略/剧情检索',
 
     // ===== B站 =====
     'login_bilibili_by_qrcode': 'B站扫码登录',
