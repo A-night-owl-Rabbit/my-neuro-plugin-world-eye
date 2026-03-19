@@ -53,11 +53,6 @@ const ABBREVIATION_MAP = {
     'beichen_weather_reminder': '天气查询',
     'sleep_weather_auto_check': '睡前天气提醒',
 
-    // ===== AI日志 =====
-    'write_ai_diary': 'AI日志生成',
-    'read_recent_diary': '查看最近AI日志',
-    'write_monthly_summary': '月度总结生成',
-
     // ===== 代码执行 =====
     'execute_code': '执行Python代码(数据处理/文件/网络/计算)',
     'install_packages': '安装Python包(pip)',

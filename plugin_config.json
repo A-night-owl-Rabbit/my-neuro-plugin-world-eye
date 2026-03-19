@@ -30,7 +30,7 @@
         "description": "关闭则复用主应用的 LLM 配置",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "api_key": {
         "title": "API Key",

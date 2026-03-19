@@ -168,7 +168,9 @@ class WorldEyePlugin extends Plugin {
         );
 
         logToTerminal('info', `${PLUGIN_TAG} 执行完成: ${toolName}，结果长度: ${result.length}`);
-        return result;
+        // 添加完成标识，避免主 LLM 误判需再次调用工具，从而减少重复结果导致的 TTS 卡住
+        const completionPrefix = '【世界之眼执行完毕】\n\n';
+        return result.startsWith(completionPrefix) ? result : completionPrefix + result;
     }
 
     // ===== 构建元工具 =====
@@ -211,7 +213,7 @@ class WorldEyePlugin extends Plugin {
                 type: 'function',
                 function: {
                     name: 'world_eye_execute',
-                    description: '委派下级智能体执行指定工具。需先通过 world_eye_search 确认工具名称，或直接使用最近调用过的工具名。提供工具名和具体的任务要求/参数，下级智能体将根据完整的工具定义和使用示例来执行工具调用。',
+                    description: '委派下级智能体执行指定工具。需先通过 world_eye_search 确认工具名称，或直接使用最近使用过的工具名。提供工具名和具体的任务要求/参数，下级智能体将根据完整的工具定义和使用示例来执行工具调用。【重要】本次调用一经返回即表示已执行完毕，请仅根据本次返回结果直接生成面向用户的回复，勿对同一任务重复调用本工具。',
                     parameters: {
                         type: 'object',
                         properties: {
