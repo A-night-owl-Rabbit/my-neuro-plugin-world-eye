@@ -43,4 +43,4 @@
 
 ## 缩略词
 
-所有工具的缩略词保存在 `abbreviations.js` 中，经人工审定。运行时持久化到 `tool_cache.json`（自动生成）。
+所有工具的缩略词保存在 `abbreviations.js` 中，经人工审定。运行时持久化到 `tool_cache.json`（自动生成）。本项目采用 Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) 许可证。
