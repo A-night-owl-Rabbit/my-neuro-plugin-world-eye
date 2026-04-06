@@ -1,9 +1,9 @@
 {
   "name": "world-eye",
   "displayName": "世界之眼",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "author": "LikeNightRabbit",
-  "description": "工具搜索与智能路由插件：自动发现所有工具、BM25 检索工具定义、下级智能体委派执行，实现大规模工具库的高效调用",
+  "description": "任务型多智能体代理路由：支持任务目标驱动、研究工作流、角色分工与按角色独立模型执行",
   "main": "index.js",
   "lang": "js"
 }

@@ -1,24 +1,283 @@
 {
   "enabled": {
     "title": "启用插件",
-    "description": "是否启用世界之眼工具路由",
+    "description": "是否启用世界之眼插件代理路由",
     "type": "bool",
     "default": true,
     "value": true
   },
-  "search_top_k": {
-    "title": "搜索返回数量",
-    "description": "每次搜索返回的候选工具数量",
-    "type": "int",
-    "default": 5,
-    "value": 5
-  },
-  "cache_ttl_seconds": {
-    "title": "缓存过期时间（秒）",
-    "description": "最近使用过的工具缓存时间，缓存期内重复调用可跳过搜索",
-    "type": "int",
-    "default": 300,
-    "value": 300
+  "delegated_plugins": {
+    "title": "代理插件列表",
+    "description": "勾选需要由世界之眼代理的插件，被代理的插件工具将由下级智能体执行，主LLM仅能看到插件描述",
+    "type": "object",
+    "fields": {
+      "ai-log": {
+        "title": "思痕之册",
+        "description": "每一天的对话都值得铭记 —— 夜幕降临时自动凝结当日思绪为观察日志，汇聚月光编织月度回忆录，让 AI 的记忆跨越每一次重启",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "auto-chat": {
+        "title": "自动对话模块",
+        "description": "空闲时自动发起对话，可配置触发间隔",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "bilibili-live": {
+        "title": "B站直播弹幕",
+        "description": "监听B站直播间弹幕，自动读取并让AI回应",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "code-executor": {
+        "title": "代码执行器",
+        "description": "增强版Python代码执行器 - 支持文件输出、图表生成、40+库预注入、执行历史、WebUI面板、安全检查、AI错误分析",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "context-compressor": {
+        "title": "上下文压缩",
+        "description": "对话超过阈值时自动压缩旧消息，节省token",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "diary": {
+        "title": "AI 日记",
+        "description": "闲置一段时间后自动让 AI 写日记，TTS 结束时重置计时器",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "keyboard": {
+        "title": "键盘控制",
+        "description": "按方向键控制，提供 press_arrow 工具",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "memos": {
+        "title": "MemOS 长期记忆",
+        "description": "MemOS 长期记忆系统插件：自动检索注入记忆、自动保存对话、提供 12 个 Function Call 工具（搜索/添加记忆、图片记忆、工具记录、知识库导入、记忆修正、偏好查询）",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "minecraft": {
+        "title": "Minecraft 游戏集成",
+        "description": "连接 Mindcraft 服务器，将语音输入转发给 MC 机器人",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "mood-chat": {
+        "title": "心情对话系统",
+        "description": "基于心情分数的智能主动对话模块，根据AI当前心情自动发起对话",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "mouse-click": {
+        "title": "鼠标点击",
+        "description": "点击鼠标当前位置，提供 click_mouse 工具",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "multi-search": {
+        "title": "多引擎搜索",
+        "description": "统合 VSearch 语义并发搜索与多引擎搜索（Google/Bing/DuckDuckGo/Scholar/Tavily），所有结果经 AI 深度提炼",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "sfx": {
+        "title": "音效播放",
+        "description": "播放音效增强对话表现力，提供 play_sound_effect 工具",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "thinking-bubble": {
+        "title": "思考气泡",
+        "description": "在等待LLM回复期间，显示萌化的「正在思考」气泡，提升交互反馈体验",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "translation": {
+        "title": "同声传译",
+        "description": "将送入TTS的文本翻译为目标语言，字幕保持原文不变",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "windows-app-launcher": {
+        "title": "Windows 应用启动器",
+        "description": "根据名称启动本机应用：扫描桌面 .exe/.lnk/.url，维护 apps.json，支持 http(s) 与 steam:// 链接。",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "astrbook-forum": {
+        "title": "AstrBook 论坛",
+        "description": "让 AI 助手可以浏览和参与 AstrBook 论坛讨论，支持发帖、回帖、通知、点赞、拉黑、图片上传、论坛日记等功能",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "bilibili-tools": {
+        "title": "B站工具集",
+        "description": "提供B站视频搜索、排行榜、信息获取、内容转录与智能总结、评论与弹幕发送、点赞投币收藏等功能",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "check-in": {
+        "title": "定时问候",
+        "description": "每隔一段时间让 AI 主动问用户在做什么",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "core-memory-injector": {
+        "title": "核心记忆注入",
+        "description": "启动时读取核心用户记忆.txt并注入到系统提示词，文件变更时自动刷新",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "dawn-dusk-line": {
+        "title": "晨昏之线",
+        "description": "时间与环境感知：可配置时区、精确时间戳、上午/中午/下午/晚上/深夜、中国法定节假日与调休（chinese-workday）；每次 LLM 请求可注入感知前缀。另含整点主动问候与时间查询工具。插件目录需 npm install。",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "dynamic-persona": {
+        "title": "动态人格",
+        "description": "根据用户消息和时间动态调整AI当前状态，让回复更有生命力",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "feiniu-board-game": {
+        "title": "肥牛棋盘（桌面）",
+        "description": "与肥牛在桌面浮层对弈（井字棋、五子棋、围棋、象棋、军棋）；强度随 mood-chat 心情变化；对局中与局后均可向 LLM 注入简短情境；局后可注入限时对话状态。必备依赖：built-in/mood-chat。",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "jimeng-video": {
+        "title": "即梦视频生成",
+        "description": "火山引擎即梦官方 visual API（视频 3.0 Pro）；生成视频并可下载到本地",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "llm-inspector": {
+        "title": "LLM 抓包器",
+        "description": "拦截每次 LLM 请求，完整记录 system/user/assistant/tool 消息和工具定义，同步输出到终端和日志文件",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "loki-shadow": {
+        "title": "洛基之影",
+        "description": "游戏陪玩插件：自动检测游戏、本地攻略库 + 游民星空/B站/网络搜索并行拉取，DeepSeek 主 Agent + Qwen 后备；分层任务追踪、来源门控、跨会话轻量持久化与剧透偏好。",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "mcp-filesystem": {
+        "title": "文件系统工具",
+        "description": "让 AI 助手可以读写文件、编辑文件、浏览目录、搜索文件等文件系统操作，基于 MCP Filesystem Server 改造",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "minimax-music": {
+        "title": "MiniMax 音乐生成",
+        "description": "使用 MiniMax AI 根据歌词与风格描述生成原创音乐，支持人声歌曲与纯音乐/BGM，配置项在插件设置中管理",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "myneuro-plugin-skills": {
+        "title": "Skills",
+        "description": "A plugin to manage and fetch SKILLs.",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "notes": {
+        "title": "备忘录",
+        "description": "让 AI 帮你记备忘，支持保存、查看、删除，数据持久化到本地文件",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "openrouter-image": {
+        "title": "OpenRouter 生图",
+        "description": "使用 OpenRouter 的 google/gemini-3-pro-image-preview 生成图片并保存到本地目录",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "rebirth-feiniu-music": {
+        "title": "重生之网易云没火肥牛要火了",
+        "description": "网易云音乐集成：搜索、播放、歌单管理、每日推荐、智能推荐（私人漫游/心动模式/雷达歌单）、偏好分析、随机播放，完整 Live2D 联动（嘴型同步、歌词气泡、麦克风动作）",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "shadow-hand": {
+        "title": "影者之手",
+        "description": "影者之手 — 基于视觉语言模型的桌面自动化。AI 可以看到屏幕并通过鼠标键盘操控电脑完成任务。",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "smart-barrage": {
+        "title": "智能弹幕过滤",
+        "description": "批量收集弹幕，由 LLM 自动挑选值得回复的内容；带 # 前缀的弹幕可立即点名回复",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "test-logger": {
+        "title": "测试插件",
+        "description": "验证插件框架是否正常工作",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "txt-writer": {
+        "title": "TXT 文件写入",
+        "description": "创建 .txt 文件并写入文本内容，支持覆盖；禁止写入系统敏感目录（原 server-tools/create_txt_writer 迁移）",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "watch-screen": {
+        "title": "看视频",
+        "description": "实时截图，保留最近5帧上下文。被动：每次用户说话时自动把最新屏幕注入LLM。主动：定时观察屏幕，有趣时自主评论。",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "weather-reminder": {
+        "title": "天气提醒",
+        "description": "基于和风天气 API 查询地区预报；支持按配置切换地区与「今天/明天」分界时刻，并提供睡前意图触发的天气提醒",
+        "type": "bool",
+        "default": false,
+        "value": false
+      }
+    }
   },
   "sub_agent": {
     "title": "下级智能体配置",
@@ -30,7 +289,7 @@
         "description": "关闭则复用主应用的 LLM 配置",
         "type": "bool",
         "default": false,
-        "value": true
+        "value": false
       },
       "api_key": {
         "title": "API Key",
@@ -66,6 +325,713 @@
         "type": "float",
         "default": 0.3,
         "value": 0.3
+      }
+    }
+  },
+  "agent_models": {
+    "title": "角色模型配置",
+    "description": "按角色为世界之眼内部智能体绑定不同模型。关闭独立模型则回退到下级智能体默认模型或主配置。",
+    "type": "object",
+    "fields": {
+      "planner": {
+        "title": "规划角色",
+        "description": "规划角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "search": {
+        "title": "搜索角色",
+        "description": "搜索角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "reviewer": {
+        "title": "审查角色",
+        "description": "审查角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "reporter": {
+        "title": "报告角色",
+        "description": "报告角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "persona": {
+        "title": "人设角色",
+        "description": "人设角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "code": {
+        "title": "代码角色",
+        "description": "代码角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.2,
+            "value": 0.2
+          }
+        }
+      },
+      "music": {
+        "title": "音乐角色",
+        "description": "音乐角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "image": {
+        "title": "生图角色",
+        "description": "生图角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "file": {
+        "title": "文件角色",
+        "description": "文件角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "app": {
+        "title": "应用角色",
+        "description": "应用角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "synthesizer": {
+        "title": "汇总角色",
+        "description": "汇总角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 5,
+            "value": 5
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      },
+      "skills": {
+        "title": "技能角色",
+        "description": "技能角色使用的独立模型配置",
+        "type": "object",
+        "fields": {
+          "use_separate_model": {
+            "title": "使用独立模型",
+            "description": "关闭则回退到默认下级模型配置",
+            "type": "bool",
+            "default": false,
+            "value": false
+          },
+          "api_key": {
+            "title": "API Key",
+            "description": "该角色专用 API Key",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "api_url": {
+            "title": "API 地址",
+            "description": "该角色专用 API 地址",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "model": {
+            "title": "模型名称",
+            "description": "该角色使用的模型",
+            "type": "string",
+            "default": "",
+            "value": ""
+          },
+          "max_iterations": {
+            "title": "最大调用轮次",
+            "description": "该角色单次最大轮次",
+            "type": "int",
+            "default": 8,
+            "value": 8
+          },
+          "temperature": {
+            "title": "生成温度",
+            "description": "该角色生成温度",
+            "type": "float",
+            "default": 0.3,
+            "value": 0.3
+          }
+        }
+      }
+    }
+  },
+  "role_plugin_bindings": {
+    "title": "角色插件映射",
+    "description": "为各角色指定默认可调用的代理插件，使用逗号分隔插件名。为空时走内置默认映射。",
+    "type": "object",
+    "fields": {
+      "search": {
+        "title": "搜索角色",
+        "description": "搜索角色默认绑定的插件列表，逗号分隔。",
+        "type": "string",
+        "default": "multi-search,bilibili-tools",
+        "value": "multi-search,bilibili-tools"
+      },
+      "music": {
+        "title": "音乐角色",
+        "description": "音乐角色默认绑定的插件列表，逗号分隔。",
+        "type": "string",
+        "default": "minimax-music,rebirth-feiniu-music",
+        "value": "minimax-music,rebirth-feiniu-music"
+      },
+      "image": {
+        "title": "生图角色",
+        "description": "生图角色默认绑定的插件列表，逗号分隔。",
+        "type": "string",
+        "default": "openrouter-image",
+        "value": "openrouter-image"
+      },
+      "code": {
+        "title": "代码角色",
+        "description": "代码角色默认绑定的插件列表，逗号分隔。",
+        "type": "string",
+        "default": "code-executor",
+        "value": "code-executor"
+      },
+      "file": {
+        "title": "文件角色",
+        "description": "文件角色默认绑定的插件列表，逗号分隔。",
+        "type": "string",
+        "default": "mcp-filesystem,txt-writer",
+        "value": "mcp-filesystem,txt-writer"
+      },
+      "app": {
+        "title": "应用角色",
+        "description": "应用角色默认绑定的插件列表，逗号分隔。",
+        "type": "string",
+        "default": "windows-app-launcher",
+        "value": "windows-app-launcher"
+      },
+      "general": {
+        "title": "通用角色",
+        "description": "通用角色默认绑定的插件列表，逗号分隔。",
+        "type": "string",
+        "default": "",
+        "value": ""
+      },
+      "skills": {
+        "title": "技能角色",
+        "description": "技能角色默认绑定的插件列表（小红书、浏览器自动化等），逗号分隔。",
+        "type": "string",
+        "default": "myneuro-plugin-skills",
+        "value": "myneuro-plugin-skills"
+      }
+    }
+  },
+  "task_limits": {
+    "title": "任务限制",
+    "description": "限制世界之眼并发任务数量，尤其是代码任务。",
+    "type": "object",
+    "fields": {
+      "max_concurrent_tasks": {
+        "title": "最大并发任务数",
+        "description": "世界之眼同时运行的任务上限",
+        "type": "int",
+        "default": 6,
+        "value": 6
+      },
+      "max_concurrent_code_tasks": {
+        "title": "最大并发代码任务数",
+        "description": "CodeAgent 同时运行上限，建议保持 1",
+        "type": "int",
+        "default": 1,
+        "value": 1
+      }
+    }
+  },
+  "security": {
+    "title": "安全策略",
+    "description": "控制代码任务和高风险行为的安全限制。",
+    "type": "object",
+    "fields": {
+      "code_execution_enabled": {
+        "title": "启用代码执行任务",
+        "description": "关闭后将拒绝 CodeAgent 任务",
+        "type": "bool",
+        "default": true,
+        "value": true
+      },
+      "code_allowed_plugins": {
+        "title": "允许代码执行的插件",
+        "description": "逗号分隔，默认只允许 code-executor",
+        "type": "string",
+        "default": "code-executor",
+        "value": "code-executor"
+      },
+      "block_dangerous_commands": {
+        "title": "拦截高危命令模式",
+        "description": "对任务描述中的明显危险命令进行拦截",
+        "type": "bool",
+        "default": true,
+        "value": true
       }
     }
   }

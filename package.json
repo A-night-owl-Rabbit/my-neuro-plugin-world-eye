@@ -1,0 +1,14 @@
+{
+  "name": "world-eye",
+  "version": "3.0.0",
+  "private": true,
+  "description": "世界之眼插件：在本目录执行 npm install 安装运行所需依赖（子智能体 HTTP 兼容层）",
+  "main": "index.js",
+  "scripts": {},
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  }
+}
