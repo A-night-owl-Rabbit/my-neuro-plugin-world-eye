@@ -364,11 +364,25 @@ class SubAgent {
         return sections.join('\n');
     }
 
+    /**
+     * 解析指定角色的模型分组映射，返回组配置或 null。
+     */
+    _resolveModelGroup(role) {
+        const groups = this._pluginConfig?.model_groups;
+        const mapping = this._pluginConfig?.role_model_mapping;
+        if (!groups || !mapping) return null;
+        const groupName = mapping[role];
+        if (!groupName || !groups[groupName]) return null;
+        const g = groups[groupName];
+        if (g.api_url && g.api_key && g.model) return g;
+        return null;
+    }
+
     _resolveLLMConfig(role, override = null) {
         const globalLlm = this._config?.llm || {};
         const defaultCfg = this._pluginConfig?.sub_agent || {};
         let roleCfg = this._pluginConfig?.agent_models?.[role] || {};
-        // router 未单独配密钥时，复用 planner 的独立模型（与动态规划同一套 DeepSeek 等配置）
+
         if (role === 'router') {
             const r = this._pluginConfig?.agent_models?.router || {};
             const p = this._pluginConfig?.agent_models?.planner || {};
@@ -389,10 +403,15 @@ class SubAgent {
             selected = override;
         } else if (roleCfg.use_separate_model && roleCfg.api_url && roleCfg.api_key) {
             selected = roleCfg;
-        } else if (defaultCfg.use_separate_model && defaultCfg.api_url && defaultCfg.api_key) {
-            selected = defaultCfg;
         } else {
-            selected = globalLlm;
+            const groupCfg = this._resolveModelGroup(role);
+            if (groupCfg) {
+                selected = groupCfg;
+            } else if (defaultCfg.use_separate_model && defaultCfg.api_url && defaultCfg.api_key) {
+                selected = defaultCfg;
+            } else {
+                selected = globalLlm;
+            }
         }
 
         const apiUrl = (selected.api_url || '').replace(/\/+$/, '');
@@ -403,6 +422,11 @@ class SubAgent {
 
         if (!apiUrl || !apiKey || !model) {
             logToTerminal('warn', `🌍 [世界之眼] ${role} 未配置完整模型信息，将尝试按现有字段继续执行`);
+        }
+
+        const groupName = this._pluginConfig?.role_model_mapping?.[role] || '';
+        if (groupName) {
+            logToTerminal('info', `🌍 [世界之眼] ${role} 使用模型组「${groupName}」→ ${model}`);
         }
 
         return {

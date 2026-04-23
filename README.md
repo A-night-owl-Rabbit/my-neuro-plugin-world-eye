@@ -1,5 +1,9 @@
 # 世界之眼 (World Eye) 插件
 
+**v3** — 任务型多智能体代理路由：对主 AI **瘦身工具列表**，由**下级智能体**按角色调用已勾选代理的插件；支持单步委派、多步目标编排、专题研究与任务队列。
+
+**完整功能列表（群公告短版 + 分表）→ [FEATURES.md](./FEATURES.md)**
+
 任务型多智能体代理路由：支持任务目标驱动、研究工作流、角色分工与按角色独立模型执行；在保留「搜索 + 执行」瘦身思路的同时，面向复杂任务做多角色编排。
 
 ## 快速开始（开箱即用）
@@ -13,6 +17,15 @@
 可选：若使用独立 `config.json`，可复制 `config.example.json` 为 `config.json` 后填写（`config.json` 已被 `.gitignore` 忽略，不会进仓库）。
 
 ## 版本与更新说明（中文）
+
+### 2026-04-23：与 my-neuro-main 本地插件同步
+
+本次从主项目目录 `live-2d/plugins/community/world-eye` **复制同步**至本仓库（在临时目录操作，**未改动**你机器上的插件目录）。更新要点如下：
+
+- **核心逻辑**：同步 `index.js`、`sub-agent.js`、`lib/` 等与运行行为相关的实现，与当前主项目插件保持一致。
+- **配置与元数据**：同步 `metadata.json`、`plugin_config.json`、`config.example.json`、`package.json` / `package-lock.json`。
+- **文档**：新增/同步 **[FEATURES.md](./FEATURES.md)**，README 增加 v3 摘要与功能索引入口；依赖说明与「开箱即用」表述对齐。
+- **隐私与安全（刻意未提交）**：未包含本地 `config.json`（含 API Key 等）；未包含 `data/research-archive/` 下个人研究过程产生的 `.md` 归档；仓库 `.gitignore` 继续忽略 `config.json`、`tool_cache.json`、`*.log` 等本地敏感与运行时文件。
 
 ### v3.0.0（与本仓库同步）
 

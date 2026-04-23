@@ -37,7 +37,7 @@
         "description": "增强版Python代码执行器 - 支持文件输出、图表生成、40+库预注入、执行历史、WebUI面板、安全检查、AI错误分析",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "context-compressor": {
         "title": "上下文压缩",
@@ -51,14 +51,14 @@
         "description": "闲置一段时间后自动让 AI 写日记，TTS 结束时重置计时器",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "keyboard": {
         "title": "键盘控制",
         "description": "按方向键控制，提供 press_arrow 工具",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "memos": {
         "title": "MemOS 长期记忆",
@@ -86,14 +86,14 @@
         "description": "点击鼠标当前位置，提供 click_mouse 工具",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "multi-search": {
         "title": "多引擎搜索",
         "description": "统合 VSearch 语义并发搜索与多引擎搜索（Google/Bing/DuckDuckGo/Scholar/Tavily），所有结果经 AI 深度提炼",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "sfx": {
         "title": "音效播放",
@@ -121,6 +121,20 @@
         "description": "根据名称启动本机应用：扫描桌面 .exe/.lnk/.url，维护 apps.json，支持 http(s) 与 steam:// 链接。",
         "type": "bool",
         "default": false,
+        "value": true
+      },
+      "agent-dream": {
+        "title": "Agent Dream 梦系统",
+        "description": "仿生梦系统：让肥牛在深夜自主入梦，通过记忆涟漪浪潮算法回忆、联想、重构记忆，产生梦境叙事，并可在梦中对记忆执行合并/删除/感悟操作（需审批）",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "anime-scene-recognizer": {
+        "title": "动漫识别伴看",
+        "description": "通过 trace.moe 识别桌面截图中的动漫场景，自动搜索百科信息并追踪观看进度，为 AI 提供伴看上下文",
+        "type": "bool",
+        "default": false,
         "value": false
       },
       "astrbook-forum": {
@@ -135,7 +149,7 @@
         "description": "提供B站视频搜索、排行榜、信息获取、内容转录与智能总结、评论与弹幕发送、点赞投币收藏等功能",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "check-in": {
         "title": "定时问候",
@@ -167,7 +181,7 @@
       },
       "feiniu-board-game": {
         "title": "肥牛棋盘（桌面）",
-        "description": "与肥牛在桌面浮层对弈（井字棋、五子棋、围棋、象棋、军棋）；强度随 mood-chat 心情变化；对局中与局后均可向 LLM 注入简短情境；局后可注入限时对话状态。必备依赖：built-in/mood-chat。",
+        "description": "Web UI 版肥牛棋盘（井字棋、五子棋、围棋、象棋、军棋）；强度随 mood-chat 心情变化；对局中与局后均可向 LLM 注入简短情境；局后可注入限时对话状态。必备依赖：built-in/mood-chat。",
         "type": "bool",
         "default": false,
         "value": false
@@ -177,7 +191,7 @@
         "description": "火山引擎即梦官方 visual API（视频 3.0 Pro）；生成视频并可下载到本地",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "llm-inspector": {
         "title": "LLM 抓包器",
@@ -188,7 +202,7 @@
       },
       "loki-shadow": {
         "title": "洛基之影",
-        "description": "游戏陪玩插件：自动检测游戏、本地攻略库 + 游民星空/B站/网络搜索并行拉取，DeepSeek 主 Agent + Qwen 后备；分层任务追踪、来源门控、跨会话轻量持久化与剧透偏好。",
+        "description": "游戏陪玩插件：自动检测游戏、本地攻略库 + 游民星空/B站/网络搜索并行拉取，DeepSeek 主 Agent + Qwen 后备；分层任务追踪、来源门控、跨会话轻量持久化与剧透偏好。已移除剧情被动注入与 characters 角色栏追踪，强化内部决策禁止外显。",
         "type": "bool",
         "default": false,
         "value": false
@@ -198,21 +212,21 @@
         "description": "让 AI 助手可以读写文件、编辑文件、浏览目录、搜索文件等文件系统操作，基于 MCP Filesystem Server 改造",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "minimax-music": {
         "title": "MiniMax 音乐生成",
-        "description": "使用 MiniMax AI 根据歌词与风格描述生成原创音乐，支持人声歌曲与纯音乐/BGM，配置项在插件设置中管理",
+        "description": "使用 MiniMax AI 生成原创音乐（music-2.6），原生支持人声歌曲、纯音乐/BGM 及参考音频翻唱（music-cover），支持自动歌词生成与 AIGC 水印",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "myneuro-plugin-skills": {
         "title": "Skills",
         "description": "A plugin to manage and fetch SKILLs.",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "notes": {
         "title": "备忘录",
@@ -226,11 +240,25 @@
         "description": "使用 OpenRouter 的 google/gemini-3-pro-image-preview 生成图片并保存到本地目录",
         "type": "bool",
         "default": false,
+        "value": true
+      },
+      "qq-connect": {
+        "title": "QQ 消息平台",
+        "description": "通过 OneBot 协议连接 QQ，支持 AI 智能回复、多级权限、远程 Agent 控制、记忆同步。Admin 对话走主管线共享上下文。",
+        "type": "bool",
+        "default": false,
         "value": false
       },
       "rebirth-feiniu-music": {
         "title": "重生之网易云没火肥牛要火了",
         "description": "网易云音乐集成：搜索、播放、歌单管理、每日推荐、智能推荐（私人漫游/心动模式/雷达歌单）、偏好分析、随机播放，完整 Live2D 联动（嘴型同步、歌词气泡、麦克风动作）",
+        "type": "bool",
+        "default": false,
+        "value": false
+      },
+      "schedule": {
+        "title": "日程管理",
+        "description": "记录、查看、完成、删除、修改日程，数据持久化保存到本地 JSON 文件，重启后依然有效",
         "type": "bool",
         "default": false,
         "value": false
@@ -261,7 +289,7 @@
         "description": "创建 .txt 文件并写入文本内容，支持覆盖；禁止写入系统敏感目录（原 server-tools/create_txt_writer 迁移）",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "watch-screen": {
         "title": "看视频",
@@ -289,35 +317,35 @@
         "description": "关闭则复用主应用的 LLM 配置",
         "type": "bool",
         "default": false,
-        "value": false
+        "value": true
       },
       "api_key": {
         "title": "API Key",
         "description": "下级智能体的 API Key",
         "type": "string",
         "default": "",
-        "value": ""
+        "value": "sk-owtfaxnbodvmhdqaoydlkfqacjjgxwuzjdzkmeaiwndozlno"
       },
       "api_url": {
         "title": "API 地址",
         "description": "下级智能体的 API 基础地址",
         "type": "string",
         "default": "",
-        "value": ""
+        "value": "https://api.siliconflow.cn/v1"
       },
       "model": {
         "title": "模型名称",
         "description": "下级智能体使用的模型，推荐支持 Function Calling 的模型",
         "type": "string",
         "default": "",
-        "value": ""
+        "value": "deepseek-ai/DeepSeek-V3.2"
       },
       "max_iterations": {
         "title": "最大调用轮次",
         "description": "下级智能体单次任务的最大工具调用轮数",
         "type": "int",
         "default": 5,
-        "value": 5
+        "value": 10
       },
       "temperature": {
         "title": "生成温度",
@@ -371,7 +399,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 100
           },
           "temperature": {
             "title": "生成温度",
@@ -420,7 +448,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 3
           },
           "temperature": {
             "title": "生成温度",
@@ -469,7 +497,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 100
           },
           "temperature": {
             "title": "生成温度",
@@ -518,7 +546,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 100
           },
           "temperature": {
             "title": "生成温度",
@@ -567,7 +595,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 100
           },
           "temperature": {
             "title": "生成温度",
@@ -609,14 +637,14 @@
             "description": "该角色使用的模型",
             "type": "string",
             "default": "",
-            "value": ""
+            "value": "claude-opus-4-6"
           },
           "max_iterations": {
             "title": "最大调用轮次",
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 80
           },
           "temperature": {
             "title": "生成温度",
@@ -665,7 +693,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 50
           },
           "temperature": {
             "title": "生成温度",
@@ -714,7 +742,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 50
           },
           "temperature": {
             "title": "生成温度",
@@ -763,7 +791,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 100
           },
           "temperature": {
             "title": "生成温度",
@@ -812,7 +840,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 100
           },
           "temperature": {
             "title": "生成温度",
@@ -861,7 +889,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 5,
-            "value": 5
+            "value": 50
           },
           "temperature": {
             "title": "生成温度",
@@ -910,7 +938,7 @@
             "description": "该角色单次最大轮次",
             "type": "int",
             "default": 8,
-            "value": 8
+            "value": 100
           },
           "temperature": {
             "title": "生成温度",
@@ -1032,6 +1060,175 @@
         "type": "bool",
         "default": true,
         "value": true
+      }
+    }
+  },
+  "model_groups": {
+    "title": "模型分组",
+    "description": "定义可复用的模型组（API地址+密钥+模型名），在 role_model_mapping 中通过组名引用，避免为每个角色重复填写。优先级低于 agent_models 中的独立配置。",
+    "type": "object",
+    "fields": {
+      "deepseek": {
+        "title": "DeepSeek（推理/规划/代码）",
+        "description": "适合规划、路由、审查、代码等需要强推理能力的角色",
+        "type": "object",
+        "fields": {
+          "api_url": {
+            "title": "API 地址",
+            "type": "string",
+            "default": "",
+            "value": "https://api.siliconflow.cn/v1"
+          },
+          "api_key": {
+            "title": "API Key",
+            "type": "string",
+            "default": "",
+            "value": "sk-owtfaxnbodvmhdqaoydlkfqacjjgxwuzjdzkmeaiwndozlno"
+          },
+          "model": {
+            "title": "模型名",
+            "type": "string",
+            "default": "deepseek-ai/DeepSeek-V3.2",
+            "value": "deepseek-ai/DeepSeek-V3.2"
+          }
+        }
+      },
+      "qwen_coder": {
+        "title": "Qwen3-Coder（快速执行）",
+        "description": "适合搜索、报告、汇总、生图、视频等执行类角色，通过硅基流动调用",
+        "type": "object",
+        "fields": {
+          "api_url": {
+            "title": "API 地址",
+            "type": "string",
+            "default": "",
+            "value": "https://api.siliconflow.cn/v1"
+          },
+          "api_key": {
+            "title": "API Key",
+            "type": "string",
+            "default": "",
+            "value": "sk-owtfaxnbodvmhdqaoydlkfqacjjgxwuzjdzkmeaiwndozlno"
+          },
+          "model": {
+            "title": "模型名",
+            "type": "string",
+            "default": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            "value": "deepseek-ai/DeepSeek-V3.2"
+          }
+        }
+      }
+    }
+  },
+  "role_model_mapping": {
+    "title": "角色→模型组映射",
+    "description": "为每个角色指定使用哪个模型组（填写 model_groups 中的组名）。留空则使用 agent_models 独立配置或默认配置。",
+    "type": "object",
+    "fields": {
+      "planner": {
+        "title": "规划角色",
+        "type": "string",
+        "default": "deepseek",
+        "value": "deepseek",
+        "description": "推荐 deepseek（需要强推理）"
+      },
+      "router": {
+        "title": "路由角色",
+        "type": "string",
+        "default": "deepseek",
+        "value": "deepseek",
+        "description": "推荐 deepseek（需要准确判断）"
+      },
+      "reviewer": {
+        "title": "审查角色",
+        "type": "string",
+        "default": "deepseek",
+        "value": "deepseek",
+        "description": "推荐 deepseek（需要批判性分析）"
+      },
+      "code": {
+        "title": "代码角色",
+        "type": "string",
+        "default": "deepseek",
+        "value": "deepseek",
+        "description": "推荐 deepseek（需要精确代码能力）"
+      },
+      "search": {
+        "title": "搜索角色",
+        "type": "string",
+        "default": "qwen_coder",
+        "value": "deepseek",
+        "description": "推荐 qwen_coder（工具调用快速执行）"
+      },
+      "reporter": {
+        "title": "报告角色",
+        "type": "string",
+        "default": "deepseek",
+        "value": "deepseek",
+        "description": "需要结构化分析能力"
+      },
+      "general": {
+        "title": "通用角色",
+        "type": "string",
+        "default": "qwen_coder",
+        "value": "deepseek",
+        "description": "推荐 qwen_coder"
+      },
+      "image": {
+        "title": "生图角色",
+        "type": "string",
+        "default": "qwen_coder",
+        "value": "deepseek",
+        "description": "推荐 qwen_coder"
+      },
+      "video": {
+        "title": "视频角色",
+        "type": "string",
+        "default": "qwen_coder",
+        "value": "deepseek",
+        "description": "推荐 qwen_coder"
+      },
+      "file": {
+        "title": "文件角色",
+        "type": "string",
+        "default": "qwen_coder",
+        "value": "deepseek",
+        "description": "推荐 qwen_coder"
+      },
+      "app": {
+        "title": "应用角色",
+        "type": "string",
+        "default": "qwen_coder",
+        "value": "deepseek",
+        "description": "推荐 qwen_coder"
+      },
+      "skills": {
+        "title": "技能角色",
+        "type": "string",
+        "default": "qwen_coder",
+        "value": "deepseek",
+        "description": "推荐 qwen_coder"
+      },
+      "synthesizer": {
+        "title": "汇总角色",
+        "type": "string",
+        "default": "deepseek",
+        "value": "deepseek",
+        "description": "需要归纳推理能力"
+      },
+      "persona": {
+        "title": "人设角色",
+        "type": "string",
+        "default": "deepseek",
+        "value": "deepseek",
+        "description": "需要理解人设风格进行改写"
+      },
+      "music": {
+        "title": "音乐角色",
+        "type": "string",
+        "default": "qwen_coder",
+        "value": "deepseek",
+        "description": "推荐 qwen_coder"
       }
     }
   }

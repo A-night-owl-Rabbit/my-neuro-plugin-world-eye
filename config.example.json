@@ -1,12 +1,57 @@
 {
-  "enabled": true,
-  "delegated_plugins": {},
+  "enabled": {
+    "title": "启用插件",
+    "description": "是否启用世界之眼插件代理路由",
+    "type": "bool",
+    "default": true
+  },
+  "delegated_plugins": {
+    "title": "代理插件列表",
+    "description": "勾选需要由世界之眼代理的插件，被代理的插件工具将由下级智能体执行，主LLM仅能看到插件描述",
+    "type": "object",
+    "fields": {}
+  },
   "sub_agent": {
-    "use_separate_model": true,
-    "api_key": "",
-    "api_url": "",
-    "model": "",
-    "max_iterations": 5,
-    "temperature": 0.3
+    "title": "下级智能体配置",
+    "description": "负责实际工具调用的独立 LLM 配置",
+    "type": "object",
+    "fields": {
+      "use_separate_model": {
+        "title": "使用独立模型",
+        "description": "关闭则复用主应用的 LLM 配置",
+        "type": "bool",
+        "default": false
+      },
+      "api_key": {
+        "title": "API Key",
+        "description": "下级智能体的 API Key",
+        "type": "string",
+        "default": ""
+      },
+      "api_url": {
+        "title": "API 地址",
+        "description": "下级智能体的 API 基础地址",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "title": "模型名称",
+        "description": "下级智能体使用的模型，推荐支持 Function Calling 的模型",
+        "type": "string",
+        "default": ""
+      },
+      "max_iterations": {
+        "title": "最大调用轮次",
+        "description": "下级智能体单次任务的最大工具调用轮数",
+        "type": "int",
+        "default": 5
+      },
+      "temperature": {
+        "title": "生成温度",
+        "description": "下级智能体的生成温度，越低越精确",
+        "type": "float",
+        "default": 0.3
+      }
+    }
   }
 }
