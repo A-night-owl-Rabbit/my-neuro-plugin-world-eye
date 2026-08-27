@@ -51,6 +51,48 @@
         "description": "下级智能体的生成温度，越低越精确",
         "type": "float",
         "default": 0.3
+      },
+      "llm_request_timeout_ms": {
+        "title": "单次 LLM 请求超时（毫秒）",
+        "description": "单次 chat/completions 的最长等待时间；超时则本回合内附带提示后重试",
+        "type": "int",
+        "default": 120000
+      },
+      "llm_retries_per_round": {
+        "title": "超时后同回合重试次数",
+        "description": "仅对请求超时有效：首次请求之外的额外尝试次数",
+        "type": "int",
+        "default": 2
+      }
+    }
+  },
+  "personality": {
+    "title": "世界之眼人格",
+    "type": "object",
+    "fields": {
+      "enabled": {
+        "title": "启用统一工作人格",
+        "description": "v4: 所有分身共用「细致、准确、克制」工作人格；关闭则纯工程化提示。不含角色扮演与思考独白。",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "negotiation": {
+    "title": "协商交接",
+    "type": "object",
+    "fields": {
+      "enabled": {
+        "title": "启用协商",
+        "description": "v4 默认关闭以提速；开启后分身可向上游追问，每次追问多花 2-3 次模型调用。",
+        "type": "bool",
+        "default": false
+      },
+      "max_rounds": {
+        "title": "每次交接最多澄清轮数",
+        "description": "默认 0（不澄清）。",
+        "type": "int",
+        "default": 0
       }
     }
   }

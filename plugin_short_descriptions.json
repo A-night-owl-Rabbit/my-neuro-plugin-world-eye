@@ -1,0 +1,70 @@
+{
+  "_readme": "插件折叠版描述映射表。每条 ≤ 30 字，紧扣插件能干什么（能力关键词优先）。主 LLM 默认看到的就是这一行，且 v4 起会被明确标注为「极简缩写」（主 LLM 需用 world_eye_inspect 查完整工具签名）。世界之眼会读取启用的插件，所以这里可以预先把'所有'插件的描述都填好，主 LLM 仍然只能看到当前 delegated_plugins 勾选了的那些。下划线开头的 key 会被忽略（用于写注释/元数据）。",
+  "_format": "{ 'plugin-id': '能力概览（≤30 字）' }",
+  "_updated": "2026-08-15",
+
+  "ai-log": "凝结当日观察日志 + 月度回忆录",
+  "agent-dream": "深夜自主入梦，重构记忆并产生梦境叙事",
+  "anime-scene-recognizer": "影视陪看：识别作品+集数+防剧透",
+  "astrbook-forum": "AstrBook 论坛：浏览/发帖/回帖/通知",
+  "auto-chat": "空闲时自动发起对话",
+
+  "bilibili-live": "监听 B 站直播弹幕并自动回应",
+  "bilibili-tools": "B 站视频搜索/转录/三连/弹幕/排行榜",
+  "browser-harness": "受控 Chrome 内点击/抓取/截图/填表，不是给主人弹日常浏览器",
+
+  "check-in": "每隔一段时间主动问候用户",
+  "code-executor": "执行 Python 代码（含图表/AI 分析报错）",
+  "context-compressor": "对话超阈值时自动压缩旧消息省 token",
+  "core-memory-injector": "启动时注入「核心用户记忆.txt」到系统提示词",
+
+  "dawn-dusk-line": "时间感知（晨/午/夜/节假日）+ 整点问候",
+  "diary": "闲置一段时间后自动让 AI 写日记，TTS 结束时重置计时器",
+  "dynamic-persona": "根据消息和时间动态调整人格",
+
+  "feiniu-board-game": "桌面棋盘游戏（五子/围棋/象棋/军棋）",
+
+  "galgame-companion": "Galgame 陪玩：OCR 识别台词 + 评论",
+  "glm-search": "智谱清言联网搜索 + 长文分析",
+
+  "jimeng-video": "文生视频（即梦 3.0 Pro）+ 下载到本地",
+
+  "keyboard": "按方向键（press_arrow 工具）",
+  "kimi-search": "Kimi 一站式联网搜索 + 摘要",
+
+  "llm-inspector": "抓包：记录每次 LLM 请求的 messages/tools",
+  "loki-shadow": "游戏陪玩：检测游戏窗口 + 跨会话记忆",
+
+  "mcp-filesystem": "读写文件、编辑、目录浏览、文件搜索",
+  "memos": "MemOS 长期记忆：检索/添加/图片记忆/工具记录",
+  "minecraft": "连接 Mindcraft 服务器，语音控 MC bot",
+  "minimax-music": "AI 生成原创音乐：歌曲/BGM/翻唱",
+  "mood-chat": "基于心情分数的主动对话",
+  "mouse-click": "点击当前鼠标位置（click_mouse 工具）",
+  "multi-search": "多引擎并行搜索（Google/Bing/Tavily）+ AI 提炼",
+  "myneuro-plugin-skills": "技能包：小红书发布、受控页内自动化、CLI；不是给主人打开日常网页",
+
+  "notes": "备忘录：保存 / 查看 / 删除",
+
+  "openrouter-image": "文生图（Gemini-3-Pro-Image）+ 保存到本地",
+
+  "qq-connect": "通过 OneBot 连 QQ：智能回复/远程控制",
+
+  "rebirth-feiniu-music": "网易云音乐：搜索/播放/歌单/智能推荐",
+
+  "schedule": "日程记录 / 查看 / 完成 / 删改",
+  "screen-narrator": "说话前截屏 + 视觉模型转述为文字",
+  "sfx": "播放音效（play_sound_effect 工具）",
+  "shadow-hand": "视觉模型控制鼠标键盘做桌面自动化",
+  "smart-barrage": "批量收集弹幕，AI 选值得回的内容",
+
+  "test-logger": "测试插件：验证插件框架是否正常",
+  "thinking-bubble": "等待 LLM 回复时显示思考气泡",
+  "timed-tasks": "定时任务：到点提醒 / 重复执行工具",
+  "translation": "TTS 文本翻译（字幕保持原文）",
+  "txt-writer": "创建 / 写入 .txt 文件（避开系统目录）",
+
+  "watch-screen": "实时截图，被动注入或主动评论",
+  "weather-reminder": "查天气（和风）+ 睡前提醒",
+  "windows-app-launcher": "启动已登记的本机应用或桌面快捷方式，不用来打开生网址"
+}

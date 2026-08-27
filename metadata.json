@@ -1,9 +1,9 @@
 {
   "name": "world-eye",
   "displayName": "世界之眼",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "author": "LikeNightRabbit",
-  "description": "任务型多智能体代理路由：支持任务目标驱动、研究工作流、角色分工与按角色独立模型执行",
+  "description": "任务型多智能体代理路由：统一工作人格（细致/准确/克制）、压缩链路提速、任务受阻可与主模型直连补答续跑",
   "main": "index.js",
   "lang": "js"
 }

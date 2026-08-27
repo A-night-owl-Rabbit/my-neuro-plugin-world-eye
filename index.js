@@ -1,13 +1,16 @@
-// 世界之眼 (World Eye) v3 - 任务型多智能体代理路由
+// 世界之眼 (World Eye) v4 - 任务型多智能体代理路由 + 统一工作人格 + 压缩链路 + 主模型直连通讯 + 折叠协议
 
 const fs = require('fs');
 const path = require('path');
 const { Plugin } = require('./lib/plugin-base.js');
-const { logToTerminal } = require('./lib/log.js');
-const { SubAgent } = require('./sub-agent.js');
+const { logToTerminal, logToolAction } = require('./lib/log.js');
+const { SubAgent, ROLE_PROMPT_BLOCKS } = require('./sub-agent.js');
+const { buildFeiniuBackendSplitPrompt } = require('./lib/backend-split-prompt.js');
 
 const PLUGIN_TAG = '🌍 [世界之眼]';
 const TOOLS_CACHE_TTL = 60_000;
+/** 协商默认轮数（v4: 默认 0 = 关闭协商以提速；用户可在配置中开启） */
+const DEFAULT_NEGOTIATION_ROUNDS = 0;
 /** 生图意图：不用单字「画」，避免「画质」「油画布」等误判；保留常见口语短语 */
 const IMAGE_INTENT_RE = /(绘|生图|插画|海报|配图|图片|图像|封面|立绘|视觉|绘画|画图|作画|手绘|水彩|油画|素描|平面图|画一幅|画一张|画个|画只|帮我画|给.*画)/;
 /** 视频生成类目标（需在 file/「保存」等分支之前匹配） */
@@ -20,7 +23,72 @@ const TASK_STATUS = {
     COMPLETED: 'completed',
     FAILED: 'failed',
     CANCELLED: 'cancelled',
+    /** v4: 任务因信息缺口受阻，等待主模型通过 world_eye_control(action='answer') 补充信息续跑 */
+    WAITING_INPUT: 'waiting_input',
 };
+
+/**
+ * 「信息缺口」类失败特征（v4）：命中时任务转 waiting_input 请主模型补答，
+ * 而不是直接宣告失败。覆盖：名称未匹配/歧义、未登录、前置条件缺失、参数/路径不明。
+ */
+const INFO_GAP_RE = /未找到|找不到|没有找到|无匹配|匹配不到|未匹配|未能.{0,15}匹配|不存在|未识别|识别失败|歧义|候选过多|多个候选|未登录|登录态|前置条件|参数缺失|路径不明|缺少.{0,10}(名称|信息|路径|参数)|需要.{0,6}(提供|确认|明确)|not\s+found|no\s+match|ambiguous|multiple\s+matches|login\s+required|not\s+logged\s+in/i;
+
+/**
+ * 插件折叠版描述（主 LLM 默认能看到的「能力概览」）。
+ *
+ * - 数据存放在 `plugin_short_descriptions.json`（同目录），易于人工编辑。
+ * - 该文件覆盖**所有**插件（不论是否启用），但只有 delegated_plugins 勾选了的才会被主 LLM 看到。
+ * - 没收录的插件回退到「智能截断」（按标点回退到完整短句）。
+ * - 该映射在首次访问时懒加载并缓存；编辑 JSON 后重启插件生效。
+ */
+let _pluginShortDescCache = null;
+function _loadPluginShortDescriptions() {
+    if (_pluginShortDescCache) return _pluginShortDescCache;
+    try {
+        const jsonPath = path.join(__dirname, 'plugin_short_descriptions.json');
+        if (fs.existsSync(jsonPath)) {
+            const raw = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+            const cleaned = {};
+            for (const [k, v] of Object.entries(raw)) {
+                // 下划线开头的 key（_readme / _updated / _format 等元数据）跳过
+                if (k.startsWith('_')) continue;
+                if (typeof v === 'string' && v.trim()) cleaned[k] = v.trim();
+            }
+            _pluginShortDescCache = cleaned;
+            return cleaned;
+        }
+    } catch (e) {
+        logToTerminal('warn', `${PLUGIN_TAG} 读取 plugin_short_descriptions.json 失败: ${e.message}`);
+    }
+    _pluginShortDescCache = {};
+    return _pluginShortDescCache;
+}
+function getPluginShortDescription(pluginId) {
+    const map = _loadPluginShortDescriptions();
+    return map[pluginId] || null;
+}
+
+/**
+ * 智能截断：把 metadata.description 在标点处优雅截断到 maxLen 以内。
+ * 没在 PLUGIN_SHORT_DESCRIPTIONS 中收录的插件回退使用。
+ */
+function smartTruncate(text, maxLen = 28) {
+    if (!text) return '';
+    const clean = text.replace(/\s+/g, ' ').trim();
+    if (clean.length <= maxLen) return clean;
+    const head = clean.slice(0, maxLen);
+    // 优先在「。」「.」处截断
+    const sentenceEnd = head.match(/^(.*?[。.])/);
+    if (sentenceEnd && sentenceEnd[1].length >= Math.floor(maxLen * 0.5)) {
+        return sentenceEnd[1];
+    }
+    // 否则在「，、；,;」处截断
+    const lastPunct = head.match(/^(.*[，,、；;])/);
+    if (lastPunct && lastPunct[1].length >= Math.floor(maxLen * 0.5)) {
+        return lastPunct[1].replace(/[，,、；;]\s*$/, '') + '…';
+    }
+    return head + '…';
+}
 
 class WorldEyePlugin extends Plugin {
     constructor(metadata, context) {
@@ -50,11 +118,16 @@ class WorldEyePlugin extends Plugin {
         this._isDelivering = false;
         /** 结果最大存活时间（毫秒） */
         this._resultTTL = 10 * 60 * 1000;
-        /** 投递前的冷静期（等用户停止交互后再投递） */
-        this._deliveryCooldownMs = 2000;
+        /** v4: 受阻任务等待主模型补充信息的最长时间（毫秒），超时自动转失败 */
+        this._waitingInputTTL = 10 * 60 * 1000;
+        /** v4: 受阻任务超时定时器 taskId → timer */
+        this._waitingTimers = new Map();
+        /** 投递检查防抖；任务结果需要立即进入主对话，排队交给 sendToLLM 单飞锁处理。 */
+        this._deliveryCooldownMs = 0;
         /** eventBus 监听器引用（用于 onStop 清理） */
         this._boundOnInputEnd = null;
         this._boundOnTTSEnd = null;
+
     }
 
     async onInit() {
@@ -73,8 +146,37 @@ class WorldEyePlugin extends Plugin {
         this._setupAsyncDelivery();
     }
 
+    async onConfigChanged(newConfig) {
+        this._config = this.context?.getConfig?.() || this.context?._config || this._config;
+        this._pluginConfig = {
+            enabled: true,
+            delegated_plugins: {},
+            models: {},
+            roles: {},
+            limits: {},
+            security: {},
+            personality: { enabled: true },
+            negotiation: { enabled: false, max_rounds: 0 },
+            ...(newConfig && typeof newConfig === 'object' ? newConfig : {})
+        };
+        this._lastToolsRefresh = 0;
+        this._forceRefreshDelegatedPlugins();
+
+        if (this._subAgent && typeof this._subAgent.updatePluginConfig === 'function') {
+            this._subAgent.updatePluginConfig(this._pluginConfig);
+        }
+        logToTerminal('info', `${PLUGIN_TAG} 配置已热更新，已重建代理工具缓存`);
+    }
+
     async onStop() {
+        try {
+            this.context?.removeSystemPromptPatch?.('world-eye-codex-backend-split');
+        } catch { }
         this._teardownAsyncDelivery();
+        for (const timer of this._waitingTimers.values()) {
+            clearTimeout(timer);
+        }
+        this._waitingTimers.clear();
     }
 
     // ==================== 异步结果投递系统 ====================
@@ -106,21 +208,25 @@ class WorldEyePlugin extends Plugin {
 
     /**
      * 将异步任务结果压入待投递队列。
+     * @param {string} kind 'result' = 任务完成/失败结果；'blocked' = 受阻求助通知（v4）
      */
-    _enqueueResult(taskId, taskTitle, result) {
+    _enqueueResult(taskId, taskTitle, result, kind = 'result') {
         this._pendingResults.push({
             taskId,
             taskTitle,
             result,
+            kind,
             timestamp: Date.now(),
             delivered: false,
         });
-        logToTerminal('info', `${PLUGIN_TAG} 任务 ${taskId} 结果已入队，待投递队列长度: ${this._pendingResults.length}`);
+        logToTerminal('info', `${PLUGIN_TAG} 任务 ${taskId} ${kind === 'blocked' ? '受阻通知' : '结果'}已入队，待投递队列长度: ${this._pendingResults.length}`);
+        // 同步在工具日志里留一条任务生命周期事件，方便在 WebUI 工具日志面板看到后台进度
+        logToolAction('info', `🌍 世界之眼任务${kind === 'blocked' ? '受阻待补充' : '已完成'}入队 [${taskId}] ${taskTitle}（准备立即投递，队列长度: ${this._pendingResults.length}）`);
         this._scheduleDeliveryCheck();
     }
 
     /**
-     * 安排一次投递检查（带冷静期，避免打断正在进行的交互）。
+     * 安排一次投递检查。
      */
     _scheduleDeliveryCheck() {
         if (this._deliveryTimer) clearTimeout(this._deliveryTimer);
@@ -132,7 +238,7 @@ class WorldEyePlugin extends Plugin {
     }
 
     /**
-     * 检查是否空闲，若空闲则投递队列中的待处理结果。
+     * 投递队列中的待处理结果。
      */
     async _tryDeliverResults() {
         if (this._isDelivering) return;
@@ -141,38 +247,63 @@ class WorldEyePlugin extends Plugin {
         this._purgeExpiredResults();
         if (this._pendingResults.length === 0) return;
 
-        if (!this._isConversationIdle()) {
-            this._scheduleDeliveryCheck();
-            return;
-        }
-
         this._isDelivering = true;
+        let batch = [];
         try {
-            const batch = this._pendingResults.splice(0, this._pendingResults.length);
-            const combinedParts = [];
-            for (const item of batch) {
-                combinedParts.push(
-                    `--- 任务 ${item.taskId}（${item.taskTitle}）---\n${item.result}`
-                );
-            }
-            const resultText = combinedParts.join('\n\n');
+            batch = this._pendingResults.splice(0, this._pendingResults.length);
+            const resultItems = batch.filter(item => item.kind !== 'blocked');
+            const blockedItems = batch.filter(item => item.kind === 'blocked');
             const taskIds = batch.map(b => b.taskId).join(', ');
 
-            this.context.addSystemPromptPatch(
-                'world_eye_async_result',
-                `\n[世界之眼异步任务结果]\n以下是后台完成的任务结果。请用你自己的人设语气和风格，自然地把结果告诉用户，就像你自己完成了一样，不要提"世界之眼"或"后台任务"这些内部概念：\n${resultText}\n[/世界之眼异步任务结果]`
-            );
+            // 把最终结果/受阻通知写入工具日志（WebUI 工具日志面板按 [TOOL] 标记筛选展示）
+            // 异步投递不走工具调用链，logToolAction 不会被 llm-handler 自动触发，需要在这里手动补一条
+            for (const item of batch) {
+                const safeResult = String(item.result || '').slice(0, 4000);
+                logToolAction(
+                    'info',
+                    `🌍 世界之眼异步任务${item.kind === 'blocked' ? '受阻' : '完成'} [${item.taskId}] ${item.taskTitle}\n${item.kind === 'blocked' ? '通知' : '结果'}:\n${safeResult}`
+                );
+            }
 
-            logToTerminal('info', `${PLUGIN_TAG} 正在投递异步结果: ${taskIds}`);
-            await this.context.sendMessage(
-                `[内部提示] 之前安排的任务有结果了，请查看系统提示中的任务结果，用你的人设和语气自然地告诉用户。`
-            );
+            const sections = ['[内部动态上下文]'];
+            if (resultItems.length > 0) {
+                const resultText = resultItems
+                    .map(item => `--- 任务 ${item.taskId}（${item.taskTitle}）---\n${item.result}`)
+                    .join('\n\n');
+                sections.push(
+                    '[世界之眼异步任务结果]',
+                    '以下是后台完成的任务结果。请用你自己的人设语气和风格，自然地把结果告诉用户，就像你自己完成的一样，不要提"世界之眼"或"后台任务"这些内部概念。结果直接讲重点，不需要先征询用户是否要听：',
+                    resultText,
+                    '[/世界之眼异步任务结果]'
+                );
+            }
+            if (blockedItems.length > 0) {
+                const blockedText = blockedItems
+                    .map(item => item.result)
+                    .join('\n\n');
+                sections.push(
+                    '[世界之眼任务受阻通知]',
+                    '以下后台任务因缺少关键信息而暂停，按每条通知里的处理规则自主处理（优先从对话上下文补齐并调用 world_eye_control 的 answer 动作，不要征求用户同意）：',
+                    blockedText,
+                    '[/世界之眼任务受阻通知]'
+                );
+            }
 
-            setTimeout(() => {
-                this.context.removeSystemPromptPatch('world_eye_async_result');
-            }, 5000);
+            logToTerminal('info', `${PLUGIN_TAG} 正在投递异步消息: ${taskIds}（直达主对话，跳过主动消息冷却）`);
+            const deliveryResult = await this.context.sendMessage(
+                sections.join('\n'),
+                { bypassExternalPolicy: true }
+            );
+            if (deliveryResult && deliveryResult.ok === false) {
+                throw new Error(`主对话投递被拒绝: ${deliveryResult.reason || 'unknown'}`);
+            }
+
         } catch (e) {
             logToTerminal('error', `${PLUGIN_TAG} 异步结果投递失败: ${e.message}`);
+            if (batch && batch.length > 0) {
+                this._pendingResults.unshift(...batch);
+                logToTerminal('warn', `${PLUGIN_TAG} 异步结果已重新入队，待投递队列长度: ${this._pendingResults.length}`);
+            }
         } finally {
             this._isDelivering = false;
             if (this._pendingResults.length > 0) {
@@ -236,6 +367,12 @@ class WorldEyePlugin extends Plugin {
 
         request.tools.length = 0;
         request.tools.push(...this._getMetaTools(), ...kept);
+        request.tools.sort((left, right) => {
+            const a = this._toolName(left);
+            const b = this._toolName(right);
+            if (a === b) return 0;
+            return a < b ? -1 : 1;
+        });
     }
 
     getTools() {
@@ -263,6 +400,9 @@ class WorldEyePlugin extends Plugin {
             params = params || {};
             params.mode = 'async';
             return await this._handleGoal(params);
+        }
+        if (name === 'world_eye_inspect') {
+            return this._handleInspect(params || {});
         }
 
         const fallbackResult = this._tryFallbackDelegation(name, params);
@@ -311,7 +451,7 @@ class WorldEyePlugin extends Plugin {
         if (!taskDescription) {
             return (
                 '错误: 请提供 task_description，用自然语言说明要完成的目标或操作。' +
-                '使用哪个插件由世界之眼根据任务语义独立裁决；主对话填写的 plugin_name 仅为参考，可被否决。'
+                '不确定用哪个插件时省略 plugin_name 或改用 world_eye_goal。'
             );
         }
 
@@ -320,18 +460,27 @@ class WorldEyePlugin extends Plugin {
             return await this._executeDelegatedPluginRun(params, taskDescription, mode);
         }
 
-        /** 主对话层：一律先经世界之眼路由；plugin_name / agent_role 仅作建议 */
+        /**
+         * v4 点名直通：主模型显式给出有效 plugin_name 时直接执行，跳过路由模型（省 1 次 LLM 调用）。
+         * 浏览器/URL 类安全纠偏在 _executeDelegatedPluginRun 内仍然生效。
+         */
         const suggestedPlugin = params.plugin_name != null ? String(params.plugin_name).trim() : '';
         const suggestedRole =
             typeof params.agent_role === 'string' && params.agent_role.trim()
                 ? params.agent_role.trim()
                 : undefined;
+
         if (suggestedPlugin) {
-            logToTerminal(
-                'info',
-                `${PLUGIN_TAG} delegate: 主模型建议插件「${suggestedPlugin}」` +
-                    `${suggestedRole ? `、角色「${suggestedRole}」` : ''}，将由世界之眼路由裁决（可否决）`
-            );
+            this._refreshDelegatedPluginsIfNeeded();
+            if (this._delegatedPlugins.has(suggestedPlugin)) {
+                logToTerminal('info', `${PLUGIN_TAG} delegate: 点名插件「${suggestedPlugin}」直通执行（跳过路由模型）`);
+                return await this._executeDelegatedPluginRun(
+                    { ...params, plugin_name: suggestedPlugin, agent_role: suggestedRole },
+                    taskDescription,
+                    mode
+                );
+            }
+            logToTerminal('warn', `${PLUGIN_TAG} delegate: 点名插件「${suggestedPlugin}」不在代理列表，回退目标路由`);
         }
 
         return await this._handleGoal({
@@ -392,9 +541,6 @@ class WorldEyePlugin extends Plugin {
             return `错误: 插件 "${pluginName}" 当前没有可用的工具。`;
         }
 
-        const limitCheck = this._checkRoleCapacity(role);
-        const queueReason = limitCheck || '';
-
         if (role === 'code') {
             const safetyCheck = this._checkCodeTaskSafety(pluginName, taskDescription);
             if (safetyCheck) {
@@ -409,7 +555,14 @@ class WorldEyePlugin extends Plugin {
             pluginName,
             taskDescription,
             mode,
+            meta: role === 'search' ? { supersedeGroup: 'search' } : {},
         });
+        if (this._isSearchLikeTask(task)) {
+            this._cancelSupersededSearchTasks(task.id, `被新搜索任务 ${task.id} 替换`);
+        }
+
+        const limitCheck = this._checkRoleCapacity(role);
+        const queueReason = limitCheck || '';
 
         if (queueReason) {
             this._enqueueTask(task.id, 'delegate', { info, options: { role, taskDescription, pluginName } }, queueReason);
@@ -431,7 +584,8 @@ class WorldEyePlugin extends Plugin {
     async _handleResearch(params) {
         const topic = params.topic || params.task_description || '';
         const depth = (params.depth || 'standard').toLowerCase();
-        const output = (params.output || 'report+persona').toLowerCase();
+        // v4: 默认 report——主对话模型投递时本来就会用自己的人设转述，persona 改写仅显式要求时执行
+        const output = (params.output || 'report').toLowerCase();
         const mode = (params.mode || 'sync').toLowerCase();
 
         if (!topic.trim()) {
@@ -443,16 +597,17 @@ class WorldEyePlugin extends Plugin {
             return '错误: 当前没有可用于研究任务的搜索工具，请先在世界之眼配置中启用 multi-search、bilibili-tools 或相关搜索插件。';
         }
 
-        const plannerLimit = this._checkRoleCapacity('planner');
-
         const task = this._createTask({
             type: 'research',
             title: `研究: ${topic.substring(0, 50)}`,
             role: 'planner',
             taskDescription: topic,
             mode,
-            meta: { depth, output },
+            meta: { depth, output, supersedeGroup: 'search' },
         });
+        this._cancelSupersededSearchTasks(task.id, `被新研究任务 ${task.id} 替换`);
+
+        const plannerLimit = this._checkRoleCapacity('planner');
 
         if (plannerLimit) {
             this._enqueueTask(task.id, 'research', { options: { topic, depth, output } }, plannerLimit);
@@ -499,7 +654,7 @@ class WorldEyePlugin extends Plugin {
             return await this._handleResearch({
                 topic: goal,
                 depth: params.depth || 'standard',
-                output: params.output || 'report+persona',
+                output: params.output || 'report',
                 mode,
             });
         }
@@ -541,8 +696,20 @@ class WorldEyePlugin extends Plugin {
             task.abortController.abort();
             task.status = TASK_STATUS.CANCELLED;
             task.updatedAt = Date.now();
+            this._clearWaitingTimer(task.id);
             logToTerminal('info', `${PLUGIN_TAG} 任务已中止: ${task.id}`);
             return `已请求中止任务: ${task.id}`;
+        }
+
+        if (action === 'answer') {
+            const answer = String(params.answer || '').trim();
+            if (!answer) {
+                return '错误: answer 动作需要提供 answer 参数（补充信息内容）。';
+            }
+            if (task.status !== TASK_STATUS.WAITING_INPUT) {
+                return `错误: 任务 ${task.id} 当前状态为 ${task.status}，不在等待补充信息状态，无法 answer。`;
+            }
+            return this._resumeWaitingTask(task, answer);
         }
 
         if (action === 'status') {
@@ -556,39 +723,340 @@ class WorldEyePlugin extends Plugin {
             return JSON.stringify(task.structuredResult || {}, null, 2);
         }
 
-        return '未知的控制动作。支持: status, stop, cancel, result, raw_result, list, queue';
+        return '未知的控制动作。支持: status, stop, cancel, result, raw_result, list, queue, answer';
+    }
+
+    // ==================== 折叠协议 (Context Folding) ====================
+
+    /**
+     * world_eye_inspect returns detail as a tool result. Keeping it in the
+     * tool turn preserves the main system prefix for prompt caching.
+     */
+    _handleInspect(params) {
+        this._refreshDelegatedPluginsIfNeeded();
+        const pluginName = params.plugin_name != null ? String(params.plugin_name).trim() : '';
+
+        if (!pluginName) {
+            // 全量索引
+            if (this._delegatedPlugins.size === 0) return '错误: 当前没有任何被代理的插件。';
+            const sections = [];
+            for (const [name, info] of this._sortedDelegatedEntries()) {
+                sections.push(this._renderPluginDetail(name, info));
+            }
+            const detail = sections.join('\n\n');
+            return detail;
+        }
+
+        const info = this._delegatedPlugins.get(pluginName);
+        if (!info) {
+            const available = Array.from(this._delegatedPlugins.keys()).sort().join(', ');
+            return `错误: 未找到代理插件 "${pluginName}"。可用插件: ${available || '(无)'}`;
+        }
+
+        return this._renderPluginDetail(pluginName, info);
+    }
+
+    /**
+     * 渲染单个插件的详细信息（描述 + 工具列表 + 角色映射）。
+     */
+    _renderPluginDetail(name, info) {
+        const display = info.metadata?.displayName || name;
+        const desc = (info.metadata?.description || '').trim();
+        const role = this._inferRoleFromPlugin(name);
+
+        const lines = [];
+        lines.push(`### ${name}（${display}）`);
+        if (desc) lines.push(`- 描述: ${desc}`);
+        lines.push(`- 由世界之眼内部 ${role} 角色调度`);
+        const tools = this._canonicalToolList(info.tools || []);
+        if (tools.length === 0) {
+            lines.push('- 工具列表: （无）');
+        } else {
+            lines.push(`- 工具列表（${tools.length} 个）:`);
+            for (const t of tools) {
+                const fn = t.function || t;
+                const tn = (fn.name || '').trim();
+                if (!tn) continue;
+                const td = (fn.description || '').replace(/\s+/g, ' ').trim();
+                const tdShort = td.length > 200 ? td.slice(0, 200) + '…' : td;
+                lines.push(`  - \`${tn}\`: ${tdShort || '（无描述）'}`);
+            }
+        }
+        return lines.join('\n');
+    }
+
+    // ==================== 协商交接 (Negotiated Handoff) ====================
+
+    /**
+     * 封装一次「上游 → 下游」交接，允许下游对上游做 ≤maxRounds 轮的 Q&A 澄清。
+     *
+     * 参数：
+     *   - upstreamRole, downstreamRole
+     *   - downstreamTask: 给下游的任务描述
+     *   - downstreamTools: 给下游的工具定义（可为空数组）
+     *   - downstreamExtraContext: 给下游的初始 extraContext（含 fromRole handoff 信件）
+     *   - downstreamPluginName / downstreamPluginDescription: 可选，下游绑定的插件
+     *   - upstreamRefineContext: 上游在澄清时能看到的背景上下文
+     *   - signal: AbortSignal
+     *   - workerLabelPrefix: 日志 workerLabel 前缀
+     *   - maxRounds: 默认 DEFAULT_NEGOTIATION_ROUNDS=2
+     */
+    /**
+     * 旧接口：返回字符串。所有外部调用方零修改。
+     */
+    async _negotiateTransition(opts) {
+        const detailed = await this._negotiateTransitionDetailed(opts);
+        return detailed.content;
+    }
+
+    /**
+     * 带状态版本：返回 { status, content, lastToolError? } 结构体。
+     * 仅由 _executeCompositeStep 调用，复合工作流据此判定 completed/failed。
+     */
+    async _negotiateTransitionDetailed(opts) {
+        const {
+            upstreamRole, downstreamRole,
+            downstreamTask, downstreamTools = [], downstreamExtraContext = [],
+            downstreamPluginName = null, downstreamPluginDescription = '',
+            upstreamRefineContext = [], signal,
+            workerLabelPrefix = `${downstreamRole}-task`,
+        } = opts;
+
+        const negotiationEnabled = this._isNegotiationEnabled();
+        const maxRounds = negotiationEnabled ? this._getNegotiationMaxRounds() : 0;
+        let currentContext = [...downstreamExtraContext];
+
+        for (let round = 0; round <= maxRounds; round++) {
+            if (signal?.aborted) return { status: 'aborted', content: '任务已被中止。' };
+
+            const isLastRound = round === maxRounds;
+            const runtimeOpts = {
+                role: downstreamRole,
+                taskDescription: downstreamTask,
+                toolDefinitions: downstreamTools,
+                signal,
+                extraContext: currentContext,
+                workerLabel: `${workerLabelPrefix}-r${round}`,
+                isTemporaryWorker: true,
+                negotiationContext: negotiationEnabled ? {
+                    currentRound: round,
+                    maxRounds,
+                    forceExecute: isLastRound,
+                } : null,
+            };
+
+            let result;
+            if (downstreamPluginName && downstreamPluginDescription) {
+                result = await this._subAgent.executeWithStatus(
+                    downstreamPluginName,
+                    downstreamTask,
+                    downstreamPluginDescription,
+                    downstreamTools,
+                    signal,
+                    runtimeOpts
+                );
+            } else {
+                result = await this._subAgent.runWithStatus(runtimeOpts);
+            }
+
+            // 协商：下游返回 question
+            if (result.status === 'question') {
+                if (isLastRound) {
+                    logToTerminal('warn', `${PLUGIN_TAG} ⚠ ${downstreamRole} 在最后一轮仍提问，已忽略，按现状返回。`);
+                    return {
+                        status: 'max_rounds',
+                        content: result.raw || '下游未能在限定轮数内完成任务。',
+                    };
+                }
+                this._logNegotiationQ(round + 1, maxRounds, downstreamRole, upstreamRole, result.question);
+
+                const refineTaskDesc = [
+                    `下游 ${downstreamRole} 对你之前的交接产生了疑虑。请用你的思考方式直接回答以解决他的疑虑，不要重新写完整计划/报告，1-3 句话即可。`,
+                    '',
+                    '下游的疑虑：',
+                    result.question,
+                ].join('\n');
+
+                let refined;
+                try {
+                    refined = await this._subAgent.run({
+                        role: upstreamRole,
+                        taskDescription: refineTaskDesc,
+                        toolDefinitions: [],
+                        signal,
+                        extraContext: upstreamRefineContext,
+                        workerLabel: `${upstreamRole}-refine-${workerLabelPrefix}-r${round}`,
+                        isTemporaryWorker: true,
+                        negotiationContext: null, // 上游澄清不再协商
+                        maxIterations: 2,
+                    });
+                } catch {
+                    refined = `（${upstreamRole} 在澄清阶段失败，请按现有信息继续）`;
+                }
+
+                const refinedText = typeof refined === 'string' ? refined : (refined?.raw || '');
+                this._logNegotiationA(round + 1, maxRounds, upstreamRole, downstreamRole, refinedText);
+
+                currentContext.push({
+                    title: `${upstreamRole} 的澄清回应（第 ${round + 1} 轮）`,
+                    content: refinedText,
+                    fromRole: upstreamRole,
+                    isClarification: true,
+                });
+                continue;
+            }
+
+            // 完成（透传 sub-agent 的状态）
+            return result;
+        }
+
+        return { status: 'max_rounds', content: '协商达到上限但未获结果。' };
+    }
+
+    _isNegotiationEnabled() {
+        const cfg = this._pluginConfig?.negotiation;
+        if (!cfg) return false; // v4: 默认关闭（提速）；配置显式开启才协商
+        return cfg.enabled === true;
+    }
+
+    _getNegotiationMaxRounds() {
+        const cfg = this._pluginConfig?.negotiation;
+        const raw = Number(cfg?.max_rounds);
+        if (!Number.isFinite(raw) || raw < 0) return DEFAULT_NEGOTIATION_ROUNDS;
+        return Math.min(5, Math.max(0, Math.trunc(raw)));
+    }
+
+    /** 返回用户配置的 LLM 超时（毫秒），兼容新老 schema。默认 120 秒。 */
+    _getConfiguredLlmTimeoutMs() {
+        const newVal = Number(this._pluginConfig?.limits?.llm_timeout_ms);
+        if (Number.isFinite(newVal) && newVal > 0) return newVal;
+        const oldVal = Number(this._pluginConfig?.sub_agent?.llm_request_timeout_ms);
+        if (Number.isFinite(oldVal) && oldVal > 0) return oldVal;
+        return 120000;
+    }
+
+    /** 打印一次 handoff 日志 */
+    _logHandoff(fromRole, toRole) {
+        logToTerminal('info', `${PLUGIN_TAG} Handoff: ${fromRole} → ${toRole}`);
+    }
+
+    _logNegotiationQ(round, max, downRole, upRole, question) {
+        logToTerminal('info', `${PLUGIN_TAG} Handoff-Q[${round}/${max}]: ${downRole} → ${upRole}`);
+        const lines = question.split(/\r?\n/).filter(l => l.trim()).slice(0, 3);
+        for (const line of lines) {
+            const truncated = line.length > 120 ? line.slice(0, 120) + '…' : line;
+            logToTerminal('info', `${PLUGIN_TAG}    疑虑: "${truncated}"`);
+        }
+    }
+
+    _logNegotiationA(round, max, upRole, downRole, answer) {
+        logToTerminal('info', `${PLUGIN_TAG} Handoff-A[${round}/${max}]: ${upRole} → ${downRole}`);
+        const first = answer.split(/\r?\n/).find(l => l.trim()) || '';
+        const cleaned = first.replace(/^---\s*$/, '').trim();
+        const truncated = cleaned.length > 120 ? cleaned.slice(0, 120) + '…' : cleaned;
+        if (truncated) {
+            logToTerminal('info', `${PLUGIN_TAG}    回应: "${truncated}"`);
+        }
     }
 
     _getMetaTools() {
-        if (this._cachedMetaTools) return this._cachedMetaTools;
-        this._cachedMetaTools = this._buildMetaTools();
-        return this._cachedMetaTools;
+        if (!this._cachedMetaTools) {
+            this._cachedMetaTools = this._buildMetaTools();
+        }
+        // Callers are allowed to compose or normalize tool objects. Return a
+        // copy so those changes never mutate the cache-stable template.
+        return this._cloneTools(this._cachedMetaTools);
     }
 
     _buildMetaTools() {
-        const pluginLines = [];
-        for (const [name, info] of this._delegatedPlugins) {
-            const displayName = info.metadata.displayName || name;
-            const desc = info.metadata.description || '无描述';
-            pluginLines.push(`- ${name} (${displayName}): ${desc}`);
-        }
+        // 折叠版插件清单：每插件 1 行
+        // 优先用 plugin_short_descriptions.json（人工归纳的能力概览，覆盖所有插件）
+        // 没收录的插件回退到 smartTruncate（按标点优雅截断 metadata.description）
+        // 只遍历 _delegatedPlugins —— 这就保证主 LLM 只看得到「启用且代理」的插件
+        const foldedPluginLines = this._collectFoldedPluginLines();
+        const splitPrompt = this._applyBackendSplitPrompt(foldedPluginLines);
 
-        if (pluginLines.length === 0) return [];
+        if (foldedPluginLines.length === 0) return [];
+
+        const folded = foldedPluginLines.join('\n');
+
+        const goalDesc = [
+            splitPrompt,
+            '',
+            '[世界之眼·目标入口] 把目标交给后台执行体系，立即返回 task_id，结果在后台完成时自动推送给你。',
+            '适用：单步动作（生图/搜索/写代码）、多步组合（先...再...）、研究类（联网调研写报告）。',
+            '',
+            '★ 先看上面的世界之眼清单。清单覆盖的目标才用本工具；清单覆盖不了的电脑任务改用 codex_delegate。',
+            '★ 不要把清单外的目标丢进本工具碰运气。',
+            '★ 不确定某个具体工具签名时，先调 `world_eye_inspect`。',
+            '',
+            '当前后台代理插件（注意: 每行是该插件能力的**极简缩写**，不代表完整能力与工具列表；对能力有疑问先用 world_eye_inspect 查完整工具签名）:',
+            folded,
+        ].join('\n');
 
         const delegateDesc = [
-            '【异步执行】调用后立即返回任务ID，世界之眼在后台执行，结果完成后会自动通知你。',
-            '填写 task_description 说明要达成什么结果或执行什么操作（路由以任务语义为准）。',
-            '可选填写 plugin_name / agent_role：仅作主观对话层的**建议**，世界之眼独立裁决并**可完全否决**。',
-            '工作流与 world_eye_goal 相同（研究、复合编排、单插件委派等）。',
+            splitPrompt,
             '',
-            '⚠️ 多步骤、多能力协作请写清完整目标，不要拆成多次调用。也可直接使用 world_eye_goal。',
-            '⚠️ 调用后用你自己的语气和人设风格告诉用户你已经安排了，不要等待结果。结果会在后台完成后自动推送给你。',
+            '[世界之眼·点名委派] 把任务交给后台指定插件执行（异步返回 task_id）。',
+            '适用：你已经明确知道要用哪个插件做什么（已 inspect 过或对插件签名很熟）。',
+            '★ plugin_name 有效时将被**直接采纳**执行（不再经过内部路由，速度更快；仅保留浏览器/URL 类安全纠偏）。',
+            '★ 因此点名前必须确认插件能力——不确定就先 `world_eye_inspect`，或改用 `world_eye_goal` 让内部路由选。',
+            '不确定是否在清单里，也不要猜，改用 Codex。',
             '',
-            '当前已代理插件（供主对话参考；最终选用由世界之眼决定）:',
-            ...pluginLines,
+            '★ task_description 描述要达成什么结果或执行什么操作。',
+            '',
+            '可用插件（注意: 每行是极简缩写，不是完整能力清单；点名前先 inspect）:',
+            folded,
+        ].join('\n');
+
+        const researchDesc = [
+            '[世界之眼·研究流水线] 提交一个研究主题，后台自动完成搜索→审查→报告（按深度自动增减环节）。',
+            '适用：主题研究、资料综述、趋势分析、来源考证。异步返回 task_id。',
+            '当你判断旧搜索方向错了并提交新的研究/搜索任务时，世界之眼会自动中止仍在运行或排队的旧搜索任务，避免旧结果继续回流。',
+        ].join('\n');
+
+        const inspectDesc = [
+            '[世界之眼·插件详情探针] 查看某个代理插件的完整工具签名（不执行任务，仅查询）。',
+            '用法：plugin_name 留空 → 返回所有插件的完整索引；填具体名 → 返回单插件详情。',
+            '★ 硬规则: 清单里每行插件描述只是极简缩写。凡是与插件能力边界有关的判断（能不能做、该给谁做、工具叫什么），以 inspect 结果为准。',
+            '★ 显式调用 world_eye_delegate(plugin_name=X) 之前必须先 inspect 一次（除非本轮对话中已查过）。',
+            '调用后详情会作为工具结果留在当前对话，供后续决策参考。',
+        ].join('\n');
+
+        const controlDesc = [
+            '[世界之眼·任务控制] 查询/停止/补答任务。动作 status/result/raw_result/list/queue/stop/cancel/answer。',
+            '★ answer: 对处于 waiting_input（受阻等待补充信息）的任务提供补充信息并自动续跑。收到「任务受阻」通知时，优先从对话上下文补齐信息后立即调用本动作，不要征求用户同意。',
+            '新研究/搜索会自动替换旧搜索；control 主要用于明确指定某个任务。',
         ].join('\n');
 
         return [
+            {
+                type: 'function',
+                function: {
+                    name: 'world_eye_goal',
+                    description: goalDesc,
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            goal: {
+                                type: 'string',
+                                description: '任务目标（自然语言）。单步或多步复合目标都可以；复合目标请完整描述，不要拆分。'
+                            },
+                            depth: {
+                                type: 'string',
+                                description: '当目标被识别为研究任务时使用的深度（默认 standard；quick 最快）',
+                                enum: ['quick', 'standard', 'deep']
+                            },
+                            output: {
+                                type: 'string',
+                                description: '研究输出类型。默认 report；通常不需要 report+persona（你收到结果后本来就会用自己的语气转述）',
+                                enum: ['summary', 'report', 'report+persona']
+                            }
+                        },
+                        required: ['goal']
+                    }
+                }
+            },
             {
                 type: 'function',
                 function: {
@@ -599,17 +1067,15 @@ class WorldEyePlugin extends Plugin {
                         properties: {
                             plugin_name: {
                                 type: 'string',
-                                description:
-                                    '可选。主观对话层对插件的猜测；世界之眼会独立裁决，**可不采纳**。名称须与已代理插件 id 一致（若填写）。',
+                                description: '可选。要使用的代理插件 id；有效时直接采纳执行（不经内部路由）。点名前先用 world_eye_inspect 确认能力。无效或省略时回退目标路由。',
                             },
                             task_description: {
                                 type: 'string',
-                                description:
-                                    '要完成的目标或操作（路由以本字段语义为准）。'
+                                description: '要完成的目标或操作。'
                             },
                             agent_role: {
                                 type: 'string',
-                                description: '可选。主观对话层对角色的猜测；世界之眼可否决。',
+                                description: '可选。执行角色；省略时按插件自动推断。',
                                 enum: ['general', 'planner', 'search', 'music', 'image', 'video', 'code', 'file', 'app', 'skills', 'reviewer', 'reporter', 'synthesizer', 'persona']
                             },
                             depth: {
@@ -631,24 +1097,13 @@ class WorldEyePlugin extends Plugin {
                 type: 'function',
                 function: {
                     name: 'world_eye_research',
-                    description: '【异步执行】提交一个研究主题，立即返回任务ID。世界之眼会在后台自动完成规划、搜索、审查、报告生成，完成后自动通知你。适用于主题研究、资料综述、趋势分析、来源考证。调用后用你自己的人设风格告诉用户正在研究，不要等待结果。',
+                    description: researchDesc,
                     parameters: {
                         type: 'object',
                         properties: {
-                            topic: {
-                                type: 'string',
-                                description: '研究主题，例如“清明扫墓的风俗来源”或“最近 AI 的发展趋势”。'
-                            },
-                            depth: {
-                                type: 'string',
-                                description: '研究深度',
-                                enum: ['quick', 'standard', 'deep']
-                            },
-                            output: {
-                                type: 'string',
-                                description: '输出类型',
-                                enum: ['summary', 'report', 'report+persona']
-                            }
+                            topic: { type: 'string', description: '研究主题' },
+                            depth: { type: 'string', description: '默认 standard；quick 最快，deep 最全但最慢', enum: ['quick', 'standard', 'deep'] },
+                            output: { type: 'string', description: '默认 report；通常不需要 report+persona（你会自己转述结果）', enum: ['summary', 'report', 'report+persona'] }
                         },
                         required: ['topic']
                     }
@@ -657,42 +1112,16 @@ class WorldEyePlugin extends Plugin {
             {
                 type: 'function',
                 function: {
-                    name: 'world_eye_goal',
-                    description: [
-                        '【异步执行】提交一个任务目标，立即返回任务ID。世界之眼在后台自动选择最合适的工作流与插件执行，完成后自动通知你。调用后用你自己的人设风格告诉用户你已经安排了，不要等待结果。',
-                        '',
-                        '与 world_eye_delegate 的路由逻辑相同（主对话若填写 plugin_name 也仅为建议，世界之眼可否决）。',
-                        '',
-                        '★ 复合/多步骤需求请用本工具或 delegate，并把完整目标写清；不要依赖主对话猜测插件名。',
-                        '例如:',
-                        '- "画一张插画并写一段文案发布到小红书" → 自动拆分为 画图+写文案+发布 三步并行',
-                        '- "搜索最新AI新闻然后写一篇总结" → 自动拆分为 搜索+撰写 两步',
-                        '- "写一段代码并保存到文件" → 自动拆分为 编码+保存 两步',
-                        '',
-                        '也支持单步任务（画图、研究、音乐等），会自动路由到对应角色。',
-                        '',
-                        '世界之眼能力目录:',
-                        ...this._buildCapabilityLines(),
-                    ].join('\n'),
+                    name: 'world_eye_inspect',
+                    description: inspectDesc,
                     parameters: {
                         type: 'object',
                         properties: {
-                            goal: {
+                            plugin_name: {
                                 type: 'string',
-                                description: '任务目标（自然语言）。可以是单步目标如"画一张猫咪插画"，也可以是多步复合目标如"画一张赛博朋克少女插画，再写一段吐槽文案发到小红书"。复合目标请完整描述，不要拆分。'
-                            },
-                            depth: {
-                                type: 'string',
-                                description: '当目标被识别为研究任务时使用的深度',
-                                enum: ['quick', 'standard', 'deep']
-                            },
-                            output: {
-                                type: 'string',
-                                description: '当目标被识别为研究任务时使用的输出类型',
-                                enum: ['summary', 'report', 'report+persona']
+                                description: '可选。要查询的插件 id（必须与代理列表中的 id 一致）。留空则返回所有插件的完整索引。'
                             }
-                        },
-                        required: ['goal']
+                        }
                     }
                 }
             },
@@ -700,19 +1129,16 @@ class WorldEyePlugin extends Plugin {
                 type: 'function',
                 function: {
                     name: 'world_eye_control',
-                    description: '控制世界之眼任务：查看状态、获取结果、停止任务、列出任务。',
+                    description: controlDesc,
                     parameters: {
                         type: 'object',
                         properties: {
                             action: {
                                 type: 'string',
-                                description: '控制动作',
-                                enum: ['status', 'stop', 'cancel', 'result', 'raw_result', 'list', 'queue']
+                                enum: ['status', 'stop', 'cancel', 'result', 'raw_result', 'list', 'queue', 'answer']
                             },
-                            task_id: {
-                                type: 'string',
-                                description: '任务ID。list 动作可省略。'
-                            }
+                            task_id: { type: 'string', description: '任务ID。list/queue 可省略。' },
+                            answer: { type: 'string', description: 'answer 动作必填：给受阻任务的补充信息（如准确名称、路径、账号说明）。' }
                         },
                         required: ['action']
                     }
@@ -758,7 +1184,9 @@ class WorldEyePlugin extends Plugin {
         this._cachedMetaTools = null;
 
         const delegatedCfg = this._pluginConfig?.delegated_plugins || {};
-        for (const [name, enabled] of Object.entries(delegatedCfg)) {
+        for (const [name, enabled] of Object.entries(delegatedCfg).sort(
+            ([left], [right]) => left.localeCompare(right)
+        )) {
             if (!enabled) continue;
 
             const plugin = global.pluginManager?.getPlugin(name);
@@ -772,16 +1200,69 @@ class WorldEyePlugin extends Plugin {
                 tools = plugin.getTools() || [];
             } catch { }
 
-            this._delegatedPlugins.set(name, { metadata: meta, tools });
-            for (const t of tools) {
+            const stableTools = this._canonicalToolList(tools);
+            this._delegatedPlugins.set(name, { metadata: meta, tools: stableTools });
+            for (const t of stableTools) {
                 const toolName = (t.function || t).name || '';
                 if (toolName) this._delegatedToolNames.add(toolName);
             }
         }
 
         this._lastToolsRefresh = Date.now();
+        this._applyBackendSplitPrompt(this._collectFoldedPluginLines());
     }
 
+    _collectFoldedPluginLines() {
+        const foldedPluginLines = [];
+        for (const [name, info] of this._sortedDelegatedEntries()) {
+            const short = getPluginShortDescription(name)
+                || smartTruncate(info.metadata?.description || '', 28);
+            foldedPluginLines.push(`- ${name}: ${short}`);
+        }
+        return foldedPluginLines;
+    }
+
+    _applyBackendSplitPrompt(foldedPluginLines) {
+        const splitPrompt = buildFeiniuBackendSplitPrompt(foldedPluginLines);
+        this.context?.addSystemPromptPatch?.('world-eye-codex-backend-split', splitPrompt);
+        return splitPrompt;
+    }
+
+    _sortedDelegatedEntries() {
+        return Array.from(this._delegatedPlugins.entries())
+            .sort(([left], [right]) => left.localeCompare(right));
+    }
+
+    _toolName(tool) {
+        return String(tool?.function?.name || tool?.name || '');
+    }
+
+    _canonicalToolList(tools) {
+        return this._cloneTools(tools).sort((left, right) => {
+            const a = this._toolName(left);
+            const b = this._toolName(right);
+            if (a === b) return 0;
+            return a < b ? -1 : 1;
+        });
+    }
+
+    _cloneTools(tools) {
+        try {
+            return JSON.parse(JSON.stringify(Array.isArray(tools) ? tools : []));
+        } catch (_) {
+            return Array.isArray(tools) ? tools.map(tool => ({ ...tool })) : [];
+        }
+    }
+
+    /**
+     * 同步 plugin_config.json schema：
+     * - delegated_plugins 仅显示插件名（无 description），UI 简洁
+     * - 单一 roles 表合并 role_plugin_bindings + role_model_mapping
+     * - 单一 limits 块合并 task_limits + sub_agent 的超时/重试
+     * - personality / negotiation 只暴露最常用的开关
+     * - 老 schema (agent_models / sub_agent / role_plugin_bindings / role_model_mapping / model_groups / task_limits)
+     *   通过 _migrateOldConfigToNew 一次性迁移有用的值
+     */
     _syncDelegatedPluginsConfig() {
         const configPath = path.join(this._pluginDir, 'plugin_config.json');
         let raw = {};
@@ -791,188 +1272,229 @@ class WorldEyePlugin extends Plugin {
             }
         } catch { }
 
+        const hadLegacyKeys = !!(raw.model_groups || raw.role_plugin_bindings || raw.role_model_mapping
+            || raw.task_limits || raw.agent_models || raw.sub_agent);
+        raw = this._migrateOldConfigToNew(raw);
+        if (hadLegacyKeys) {
+            logToTerminal('info', `${PLUGIN_TAG} 已将老配置一次性迁移到新 schema（更紧凑、规整）`);
+        }
+
+        // 1. enabled
+        if (!raw.enabled || typeof raw.enabled !== 'object' || !('value' in raw.enabled)) {
+            const prev = typeof raw.enabled === 'boolean' ? raw.enabled : true;
+            raw.enabled = {
+                title: '启用插件',
+                description: '是否启用世界之眼插件代理路由',
+                type: 'bool',
+                default: true,
+                value: prev
+            };
+        }
+
+        // 2. delegated_plugins —— 仅 title + bool，**不带 description**
         if (!raw.delegated_plugins || typeof raw.delegated_plugins !== 'object') {
             raw.delegated_plugins = {
-                title: '代理插件列表',
-                description: '勾选需要由世界之眼代理的插件，被代理的插件工具将由下级智能体执行',
+                title: '代理插件',
+                description: '勾选要由世界之眼托管的插件',
                 type: 'object',
                 fields: {}
             };
         }
-
-        const dp = raw.delegated_plugins;
-        if (!dp.fields) dp.fields = {};
-
-        const existingFields = dp.fields;
-        const newFields = {};
-
+        if (!raw.delegated_plugins.fields) raw.delegated_plugins.fields = {};
+        const existingPluginFields = raw.delegated_plugins.fields;
+        const newPluginFields = {};
         for (const [name, meta] of this._allPluginsMeta) {
-            if (existingFields[name]) {
-                newFields[name] = existingFields[name];
-                newFields[name].title = meta.displayName || name;
-                newFields[name].description = meta.description || '';
-            } else {
-                newFields[name] = {
-                    title: meta.displayName || name,
-                    description: meta.description || '',
-                    type: 'bool',
-                    default: false,
-                    value: false
+            const oldValue = existingPluginFields[name]?.value;
+            newPluginFields[name] = {
+                title: meta.displayName || name,
+                type: 'bool',
+                default: false,
+                value: oldValue === true
+            };
+            // 注意：UI 仅显示 title + 勾选框，不再展示长 description
+        }
+        raw.delegated_plugins.fields = newPluginFields;
+
+        // 3. models —— 模型分组（保留 deepseek / qwen_coder 两组默认）
+        if (!raw.models || typeof raw.models !== 'object') {
+            raw.models = {
+                title: '模型分组',
+                description: '可复用的模型组（API地址+密钥+模型名），在 roles 表中通过组名引用',
+                type: 'object',
+                fields: {}
+            };
+        }
+        if (!raw.models.fields) raw.models.fields = {};
+        const MODEL_DEFAULTS = {
+            deepseek: { model: 'deepseek-ai/DeepSeek-V3.2' },
+            qwen_coder: { model: 'Qwen/Qwen3-Coder-480B-A35B-Instruct' },
+        };
+        for (const [groupName, defaults] of Object.entries(MODEL_DEFAULTS)) {
+            if (!raw.models.fields[groupName]) {
+                raw.models.fields[groupName] = {
+                    title: groupName,
+                    type: 'object',
+                    fields: {
+                        provider_id: {
+                            title: 'LLM 提供商',
+                            description: '优先从“LLM 配置”引用提供商；留空时兼容下方旧 API 字段。',
+                            type: 'llm_provider',
+                            default: '',
+                            value: ''
+                        },
+                        model_id: {
+                            title: 'LLM 模型',
+                            description: '选择该提供商下的模型；留空时自动选择。',
+                            type: 'llm_model',
+                            provider_field: `models.${groupName}.provider_id`,
+                            default: '',
+                            value: ''
+                        },
+                        api_url: { title: 'API 地址', type: 'string', default: '', value: '' },
+                        api_key: { title: 'API Key', type: 'string', default: '', value: '' },
+                        model: { title: '模型名', type: 'string', default: defaults.model, value: '' }
+                    }
                 };
             }
         }
-
-        dp.fields = newFields;
-
-        if (!raw.agent_models) {
-            raw.agent_models = {
-                title: '角色模型配置',
-                description: '按角色为世界之眼内部智能体绑定不同模型。关闭独立模型则回退到下级智能体默认模型或主配置。',
-                type: 'object',
-                fields: {
-                    planner: this._buildRoleModelField('规划角色'),
-                    search: this._buildRoleModelField('搜索角色'),
-                    reviewer: this._buildRoleModelField('审查角色'),
-                    reporter: this._buildRoleModelField('报告角色'),
-                    persona: this._buildRoleModelField('人设角色'),
-                    code: this._buildRoleModelField('代码角色'),
-                    music: this._buildRoleModelField('音乐角色'),
-                    image: this._buildRoleModelField('生图角色'),
-                    file: this._buildRoleModelField('文件角色'),
-                    app: this._buildRoleModelField('应用角色'),
-                    synthesizer: this._buildRoleModelField('汇总角色'),
-                    skills: this._buildRoleModelField('技能角色'),
+        for (const [groupName, group] of Object.entries(raw.models.fields)) {
+            if (!group || typeof group !== 'object') continue;
+            if (!group.fields) group.fields = {};
+            if (!group.fields.provider_id) {
+                group.fields.provider_id = {
+                    title: 'LLM 提供商',
+                    description: '优先从“LLM 配置”引用提供商；留空时兼容下方旧 API 字段。',
+                    type: 'llm_provider',
+                    default: '',
+                    value: ''
+                };
+            }
+            if (!group.fields.model_id) {
+                group.fields.model_id = {
+                    title: 'LLM 模型',
+                    description: '选择该提供商下的模型；留空时自动选择。',
+                    type: 'llm_model',
+                    provider_field: `models.${groupName}.provider_id`,
+                    default: '',
+                    value: ''
+                };
+            } else {
+                group.fields.model_id.provider_field = `models.${groupName}.provider_id`;
+            }
+            for (const legacyKey of ['api_url', 'api_key', 'model']) {
+                const legacy = group.fields[legacyKey];
+                if (legacy && typeof legacy === 'object') {
+                    legacy.description = '旧版手填字段：只有提供商下拉留空、且地址/Key/模型都填全时才生效。建议改用提供商下拉选择。';
                 }
-            };
+            }
         }
 
-        if (!raw.role_plugin_bindings) {
-            raw.role_plugin_bindings = {
-                title: '角色插件映射',
-                description: '为各角色指定默认可调用的代理插件，使用逗号分隔插件名。为空时走内置默认映射。',
+        // 4. roles —— 合并 role_plugin_bindings + role_model_mapping 为单一表
+        const ROLE_DEFAULTS = {
+            planner:     { title: 'planner（规划）',    model_group: 'deepseek',   plugins: '' },
+            router:      { title: 'router（路由）',     model_group: 'deepseek',   plugins: '' },
+            search:      { title: 'search（搜索）',     model_group: 'qwen_coder', plugins: 'multi-search,bilibili-tools,kimi-search,glm-search' },
+            reviewer:    { title: 'reviewer（审查）',   model_group: 'deepseek',   plugins: '' },
+            reporter:    { title: 'reporter（报告）',   model_group: 'deepseek',   plugins: '' },
+            synthesizer: { title: 'synthesizer（汇总）', model_group: 'deepseek',   plugins: '' },
+            persona:     { title: 'persona（口语化改写）', model_group: 'deepseek',   plugins: '' },
+            code:        { title: 'code（代码）',       model_group: 'deepseek',   plugins: 'code-executor' },
+            music:       { title: 'music（音乐）',      model_group: 'qwen_coder', plugins: 'minimax-music,rebirth-feiniu-music' },
+            image:       { title: 'image（生图）',      model_group: 'qwen_coder', plugins: 'openrouter-image' },
+            video:       { title: 'video（视频）',      model_group: 'qwen_coder', plugins: 'jimeng-video' },
+            file:        { title: 'file（文件）',       model_group: 'qwen_coder', plugins: 'mcp-filesystem,txt-writer' },
+            app:         { title: 'app（应用）',        model_group: 'qwen_coder', plugins: 'windows-app-launcher' },
+            skills:      { title: 'skills（技能）',     model_group: 'qwen_coder', plugins: 'myneuro-plugin-skills' },
+            general:     { title: 'general（兜底）',    model_group: 'qwen_coder', plugins: '' },
+        };
+        if (!raw.roles || typeof raw.roles !== 'object') {
+            raw.roles = {
+                title: '角色配置（每行 = 一个 agent 的「模型组 + 默认插件」）',
                 type: 'object',
-                fields: {
-                    search: this._buildRolePluginBindingField('搜索角色', 'multi-search,bilibili-tools'),
-                    music: this._buildRolePluginBindingField('音乐角色', 'minimax-music,rebirth-feiniu-music'),
-                    image: this._buildRolePluginBindingField('生图角色', 'openrouter-image'),
-                    code: this._buildRolePluginBindingField('代码角色', 'code-executor'),
-                    file: this._buildRolePluginBindingField('文件角色', 'mcp-filesystem,txt-writer'),
-                    app: this._buildRolePluginBindingField('应用角色', 'windows-app-launcher'),
-                    general: this._buildRolePluginBindingField('通用角色', ''),
-                    skills: this._buildRolePluginBindingField('技能角色', 'myneuro-plugin-skills'),
-                }
+                fields: {}
             };
         }
-
-        if (!raw.task_limits) {
-            raw.task_limits = {
-                title: '任务限制',
-                description: '限制世界之眼并发任务数量，尤其是代码任务。',
-                type: 'object',
-                fields: {
-                    max_concurrent_tasks: {
-                        title: '最大并发任务数',
-                        description: '世界之眼同时运行的任务上限',
-                        type: 'int',
-                        default: 6,
-                        value: 6
-                    },
-                    max_concurrent_code_tasks: {
-                        title: '最大并发代码任务数',
-                        description: 'CodeAgent 同时运行上限，建议保持 1',
-                        type: 'int',
-                        default: 1,
-                        value: 1
+        if (!raw.roles.fields) raw.roles.fields = {};
+        for (const [roleKey, def] of Object.entries(ROLE_DEFAULTS)) {
+            const existing = raw.roles.fields[roleKey];
+            if (!existing) {
+                raw.roles.fields[roleKey] = {
+                    title: def.title,
+                    type: 'object',
+                    fields: {
+                        model_group: { title: '模型组', type: 'string', default: def.model_group, value: def.model_group },
+                        plugins: { title: '默认插件', type: 'string', default: def.plugins, value: def.plugins }
                     }
+                };
+            } else {
+                existing.title = def.title;
+                if (!existing.fields) existing.fields = {};
+                if (!existing.fields.model_group) {
+                    existing.fields.model_group = { title: '模型组', type: 'string', default: def.model_group, value: def.model_group };
+                }
+                if (!existing.fields.plugins) {
+                    existing.fields.plugins = { title: '默认插件', type: 'string', default: def.plugins, value: def.plugins };
+                }
+            }
+        }
+
+        // 5. limits —— task_limits + sub_agent.{timeout,retries} 合并
+        if (!raw.limits || typeof raw.limits !== 'object') {
+            raw.limits = {
+                title: '运行限制',
+                type: 'object',
+                fields: {
+                    max_tasks: { title: '并发任务上限', type: 'int', default: 6, value: 6 },
+                    max_code_tasks: { title: '并发代码任务上限', type: 'int', default: 1, value: 1 },
+                    llm_timeout_ms: { title: 'LLM 超时(ms)', type: 'int', default: 120000, value: 120000 },
+                    llm_retries: { title: '超时重试次数', type: 'int', default: 2, value: 2 }
                 }
             };
         }
 
-        if (!raw.security) {
+        // 6. security
+        if (!raw.security || typeof raw.security !== 'object') {
             raw.security = {
-                title: '安全策略',
-                description: '控制代码任务和高风险行为的安全限制。',
+                title: '安全',
                 type: 'object',
                 fields: {
-                    code_execution_enabled: {
-                        title: '启用代码执行任务',
-                        description: '关闭后将拒绝 CodeAgent 任务',
-                        type: 'bool',
-                        default: true,
-                        value: true
-                    },
-                    code_allowed_plugins: {
-                        title: '允许代码执行的插件',
-                        description: '逗号分隔，默认只允许 code-executor',
-                        type: 'string',
-                        default: 'code-executor',
-                        value: 'code-executor'
-                    },
-                    block_dangerous_commands: {
-                        title: '拦截高危命令模式',
-                        description: '对任务描述中的明显危险命令进行拦截',
-                        type: 'bool',
-                        default: true,
-                        value: true
-                    }
+                    code_execution_enabled: { title: '允许代码执行', type: 'bool', default: true, value: true },
+                    code_allowed_plugins: { title: '代码执行白名单', type: 'string', default: 'code-executor', value: 'code-executor' },
+                    block_dangerous_commands: { title: '拦截高危命令', type: 'bool', default: true, value: true }
                 }
             };
         }
 
-        if (!raw.model_groups) {
-            raw.model_groups = {
-                title: '模型分组',
-                description: '定义可复用的模型组（API地址+密钥+模型名），在 role_model_mapping 中通过组名引用，避免为每个角色重复填写。优先级低于 agent_models 中的独立配置。',
+        // 7. personality —— 只暴露 enabled 总开关（v4: 统一工作人格，非角色扮演）
+        if (!raw.personality || typeof raw.personality !== 'object') {
+            raw.personality = {
+                title: '世界之眼人格',
                 type: 'object',
                 fields: {
-                    deepseek: {
-                        title: 'DeepSeek（推理/规划/代码）',
-                        description: '适合规划、路由、审查、代码等需要强推理能力的角色',
-                        type: 'object',
-                        fields: {
-                            api_url: { title: 'API 地址', type: 'string', default: '', value: '' },
-                            api_key: { title: 'API Key', type: 'string', default: '', value: '' },
-                            model: { title: '模型名', type: 'string', default: 'deepseek-ai/DeepSeek-V3.2', value: '' },
-                        }
-                    },
-                    qwen_coder: {
-                        title: 'Qwen3-Coder（快速执行）',
-                        description: '适合搜索、报告、汇总、生图、视频等执行类角色，通过硅基流动调用',
-                        type: 'object',
-                        fields: {
-                            api_url: { title: 'API 地址', type: 'string', default: '', value: '' },
-                            api_key: { title: 'API Key', type: 'string', default: '', value: '' },
-                            model: { title: '模型名', type: 'string', default: 'Qwen/Qwen3-Coder-480B-A35B-Instruct', value: '' },
-                        }
-                    },
+                    enabled: { title: '启用统一工作人格', type: 'bool', default: true, value: true }
                 }
             };
         }
 
-        if (!raw.role_model_mapping) {
-            raw.role_model_mapping = {
-                title: '角色→模型组映射',
-                description: '为每个角色指定使用哪个模型组（填写 model_groups 中的组名）。留空则使用 agent_models 独立配置或默认配置。',
+        // 8. negotiation —— 暴露 enabled + max_rounds（v4: 默认关闭以提速）
+        if (!raw.negotiation || typeof raw.negotiation !== 'object') {
+            raw.negotiation = {
+                title: '协商交接',
                 type: 'object',
                 fields: {
-                    planner: { title: '规划角色', type: 'string', default: 'deepseek', value: 'deepseek', description: '推荐 deepseek（需要强推理）' },
-                    router: { title: '路由角色', type: 'string', default: 'deepseek', value: 'deepseek', description: '推荐 deepseek（需要准确判断）' },
-                    reviewer: { title: '审查角色', type: 'string', default: 'deepseek', value: 'deepseek', description: '推荐 deepseek（需要批判性分析）' },
-                    code: { title: '代码角色', type: 'string', default: 'deepseek', value: 'deepseek', description: '推荐 deepseek（需要精确代码能力）' },
-                    search: { title: '搜索角色', type: 'string', default: 'qwen_coder', value: 'qwen_coder', description: '推荐 qwen_coder（工具调用快速执行）' },
-                    reporter: { title: '报告角色', type: 'string', default: 'deepseek', value: 'deepseek', description: '需要结构化分析能力' },
-                    general: { title: '通用角色', type: 'string', default: 'qwen_coder', value: 'qwen_coder', description: '推荐 qwen_coder' },
-                    image: { title: '生图角色', type: 'string', default: 'qwen_coder', value: 'qwen_coder', description: '推荐 qwen_coder' },
-                    video: { title: '视频角色', type: 'string', default: 'qwen_coder', value: 'qwen_coder', description: '推荐 qwen_coder' },
-                    file: { title: '文件角色', type: 'string', default: 'qwen_coder', value: 'qwen_coder', description: '推荐 qwen_coder' },
-                    app: { title: '应用角色', type: 'string', default: 'qwen_coder', value: 'qwen_coder', description: '推荐 qwen_coder' },
-                    skills: { title: '技能角色', type: 'string', default: 'qwen_coder', value: 'qwen_coder', description: '推荐 qwen_coder' },
-                    synthesizer: { title: '汇总角色', type: 'string', default: 'deepseek', value: 'deepseek', description: '需要归纳推理能力' },
-                    persona: { title: '人设角色', type: 'string', default: 'deepseek', value: 'deepseek', description: '需要理解人设风格进行改写' },
-                    music: { title: '音乐角色', type: 'string', default: 'qwen_coder', value: 'qwen_coder', description: '推荐 qwen_coder' },
+                    enabled: { title: '启用协商', type: 'bool', default: false, value: false },
+                    max_rounds: { title: '每交接最大轮数', type: 'int', default: 0, value: 0 }
                 }
             };
         }
+
+        // 删除所有老 schema 残留字段（迁移已把有用值搬走）
+        delete raw.agent_models;
+        delete raw.sub_agent;
+        delete raw.role_plugin_bindings;
+        delete raw.role_model_mapping;
+        delete raw.model_groups;
+        delete raw.task_limits;
 
         try {
             fs.writeFileSync(configPath, JSON.stringify(raw, null, 2), 'utf8');
@@ -981,83 +1503,181 @@ class WorldEyePlugin extends Plugin {
         }
 
         this._loadConfig();
+
+        // 通知已实例化的 SubAgent 同步最新配置
+        if (this._subAgent && typeof this._subAgent.updatePluginConfig === 'function') {
+            this._subAgent.updatePluginConfig(this._pluginConfig);
+        }
     }
 
-    _buildRoleModelField(title) {
-        return {
-            title,
-            description: `${title}使用的独立模型配置`,
-            type: 'object',
-            fields: {
-                use_separate_model: {
-                    title: '使用独立模型',
-                    description: '关闭则回退到默认下级模型配置',
-                    type: 'bool',
-                    default: false,
-                    value: false
-                },
-                api_key: {
-                    title: 'API Key',
-                    description: '该角色专用 API Key',
-                    type: 'string',
-                    default: '',
-                    value: ''
-                },
-                api_url: {
-                    title: 'API 地址',
-                    description: '该角色专用 API 地址',
-                    type: 'string',
-                    default: '',
-                    value: ''
-                },
-                model: {
-                    title: '模型名称',
-                    description: '该角色使用的模型',
-                    type: 'string',
-                    default: '',
-                    value: ''
-                },
-                max_iterations: {
-                    title: '最大调用轮次',
-                    description: '该角色单次最大轮次',
-                    type: 'int',
-                    default: 5,
-                    value: 5
-                },
-                temperature: {
-                    title: '生成温度',
-                    description: '该角色生成温度',
-                    type: 'float',
-                    default: 0.3,
-                    value: 0.3
+    /**
+     * 一次性迁移老配置到新 schema。
+     * 保留 API Key / 模型名 / 已勾选插件 / 角色绑定等用户数据。
+     */
+    _migrateOldConfigToNew(raw) {
+        if (!raw || typeof raw !== 'object') return raw;
+
+        const getNestedValue = (obj, ...keys) => {
+            let cur = obj;
+            for (const k of keys) {
+                if (cur && typeof cur === 'object' && k in cur) cur = cur[k];
+                else return undefined;
+            }
+            return cur;
+        };
+
+        // 1. model_groups → models
+        if (raw.model_groups && !raw.models) {
+            const newModels = {
+                title: '模型分组',
+                description: '可复用的模型组（API地址+密钥+模型名），在 roles 表中通过组名引用',
+                type: 'object',
+                fields: {}
+            };
+            const groupsFields = raw.model_groups.fields || {};
+            for (const [groupName, groupDef] of Object.entries(groupsFields)) {
+                const gf = groupDef?.fields || {};
+                newModels.fields[groupName] = {
+                    title: groupName,
+                    type: 'object',
+                    fields: {
+                        provider_id: {
+                            title: 'LLM 提供商',
+                            description: '优先从“LLM 配置”引用提供商；留空时兼容下方旧 API 字段。',
+                            type: 'llm_provider',
+                            default: '',
+                            value: getNestedValue(gf, 'provider_id', 'value') || ''
+                        },
+                        model_id: {
+                            title: 'LLM 模型',
+                            description: '选择该提供商下的模型；留空时自动选择。',
+                            type: 'llm_model',
+                            provider_field: `models.${groupName}.provider_id`,
+                            default: '',
+                            value: getNestedValue(gf, 'model_id', 'value') || ''
+                        },
+                        api_url: {
+                            title: 'API 地址', type: 'string',
+                            default: getNestedValue(gf, 'api_url', 'default') || '',
+                            value: getNestedValue(gf, 'api_url', 'value') || ''
+                        },
+                        api_key: {
+                            title: 'API Key', type: 'string',
+                            default: '',
+                            value: getNestedValue(gf, 'api_key', 'value') || ''
+                        },
+                        model: {
+                            title: '模型名', type: 'string',
+                            default: getNestedValue(gf, 'model', 'default') || '',
+                            value: getNestedValue(gf, 'model', 'value') || ''
+                        }
+                    }
+                };
+            }
+            raw.models = newModels;
+        }
+
+        // 2. role_plugin_bindings + role_model_mapping → roles
+        if (!raw.roles && (raw.role_plugin_bindings || raw.role_model_mapping)) {
+            const pluginsFields = raw.role_plugin_bindings?.fields || {};
+            const modelMapFields = raw.role_model_mapping?.fields || {};
+            const allRoleKeys = new Set([
+                ...Object.keys(pluginsFields),
+                ...Object.keys(modelMapFields),
+            ]);
+
+            const newRoles = {
+                title: '角色配置（每行 = 一个 agent 的「模型组 + 默认插件」）',
+                type: 'object',
+                fields: {}
+            };
+            for (const roleKey of allRoleKeys) {
+                const pluginsValue = getNestedValue(pluginsFields, roleKey, 'value') || '';
+                const modelGroupValue = getNestedValue(modelMapFields, roleKey, 'value') || '';
+                newRoles.fields[roleKey] = {
+                    title: roleKey,
+                    type: 'object',
+                    fields: {
+                        model_group: { title: '模型组', type: 'string', default: '', value: modelGroupValue },
+                        plugins: { title: '默认插件', type: 'string', default: '', value: pluginsValue }
+                    }
+                };
+            }
+            raw.roles = newRoles;
+        }
+
+        // 3. task_limits + sub_agent.{timeout,retries} → limits
+        if (!raw.limits && (raw.task_limits || raw.sub_agent)) {
+            const tlFields = raw.task_limits?.fields || {};
+            const saFields = raw.sub_agent?.fields || {};
+            raw.limits = {
+                title: '运行限制',
+                type: 'object',
+                fields: {
+                    max_tasks: { title: '并发任务上限', type: 'int', default: 6, value: getNestedValue(tlFields, 'max_concurrent_tasks', 'value') ?? 6 },
+                    max_code_tasks: { title: '并发代码任务上限', type: 'int', default: 1, value: getNestedValue(tlFields, 'max_concurrent_code_tasks', 'value') ?? 1 },
+                    llm_timeout_ms: { title: 'LLM 超时(ms)', type: 'int', default: 120000, value: getNestedValue(saFields, 'llm_request_timeout_ms', 'value') ?? 120000 },
+                    llm_retries: { title: '超时重试次数', type: 'int', default: 2, value: getNestedValue(saFields, 'llm_retries_per_round', 'value') ?? 2 }
+                }
+            };
+        }
+
+        // 4. sub_agent 上的 API Key 兜底：若 models 里 deepseek / qwen_coder 的 url/key 都还是空，
+        //    把老 sub_agent 的 url/key 灌进去（model 不动）
+        if (raw.sub_agent && raw.models?.fields) {
+            const saFields = raw.sub_agent.fields || {};
+            const saApiUrl = getNestedValue(saFields, 'api_url', 'value');
+            const saApiKey = getNestedValue(saFields, 'api_key', 'value');
+            if (saApiUrl && saApiKey) {
+                for (const gName of Object.keys(raw.models.fields)) {
+                    const g = raw.models.fields[gName];
+                    if (g?.fields) {
+                        if (!g.fields.api_url?.value) g.fields.api_url.value = saApiUrl;
+                        if (!g.fields.api_key?.value) g.fields.api_key.value = saApiKey;
+                    }
                 }
             }
-        };
-    }
+        }
 
-    _buildRolePluginBindingField(title, defaultValue) {
-        return {
-            title,
-            description: `${title}默认绑定的插件列表，逗号分隔。`,
-            type: 'string',
-            default: defaultValue,
-            value: defaultValue,
-        };
+        return raw;
     }
 
     _loadConfig() {
         this._config = this.context?.getConfig?.() || this.context?._config || null;
         try {
             const cfg = this.context.getPluginConfig();
-            this._pluginConfig = { enabled: true, delegated_plugins: {}, sub_agent: {}, agent_models: {}, role_plugin_bindings: {}, task_limits: {}, ...cfg };
+            this._pluginConfig = {
+                enabled: true,
+                delegated_plugins: {},
+                models: {},
+                roles: {},
+                limits: {},
+                security: {},
+                personality: { enabled: true },
+                negotiation: { enabled: false, max_rounds: 0 },
+                ...cfg
+            };
         } catch {
-            this._pluginConfig = { enabled: true, delegated_plugins: {}, sub_agent: {}, agent_models: {}, role_plugin_bindings: {}, task_limits: {} };
+            this._pluginConfig = {
+                enabled: true,
+                delegated_plugins: {},
+                models: {},
+                roles: {},
+                limits: {},
+                security: {},
+                personality: { enabled: true },
+                negotiation: { enabled: false, max_rounds: 0 }
+            };
         }
     }
 
     _ensureSubAgent() {
         if (!this._subAgent) {
-            this._subAgent = new SubAgent(this._config || {}, this._pluginConfig || {});
+            this._subAgent = new SubAgent(
+                this._config || {},
+                this._pluginConfig || {},
+                (providerId, modelId) => this.context.resolveLLM(providerId, modelId)
+            );
         }
     }
 
@@ -1085,6 +1705,45 @@ class WorldEyePlugin extends Plugin {
         };
         this._activeTasks.set(id, task);
         return task;
+    }
+
+    _isSearchLikeTask(task) {
+        if (!task) return false;
+        if (task.type === 'research') return true;
+        if (task.meta?.supersedeGroup === 'search') return true;
+        if (task.role === 'search') return true;
+        if (task.pluginName && this._pickPluginsByRole('search').includes(task.pluginName)) return true;
+        return false;
+    }
+
+    _cancelSupersededSearchTasks(keepTaskId, reason = '被新的搜索任务替换') {
+        const cancellable = new Set([TASK_STATUS.PENDING, TASK_STATUS.RUNNING, TASK_STATUS.WAITING_INPUT]);
+        const cancelledIds = [];
+
+        for (const task of this._activeTasks.values()) {
+            if (!task || task.id === keepTaskId) continue;
+            if (!cancellable.has(task.status)) continue;
+            if (!this._isSearchLikeTask(task)) continue;
+
+            if (!task.abortController.signal.aborted) {
+                task.abortController.abort();
+            }
+            task.status = TASK_STATUS.CANCELLED;
+            task.error = reason;
+            task.finishedAt = Date.now();
+            task.updatedAt = Date.now();
+            task.meta.cancelReason = reason;
+            this._clearWaitingTimer(task.id);
+            cancelledIds.push(task.id);
+        }
+
+        if (cancelledIds.length > 0) {
+            this._taskQueue = this._taskQueue.filter(item => !cancelledIds.includes(item.taskId));
+            logToTerminal('info', `${PLUGIN_TAG} 已自动中止旧搜索任务: ${cancelledIds.join(', ')}；原因: ${reason}`);
+            logToolAction('info', `🌍 世界之眼已自动中止旧搜索任务: ${cancelledIds.join(', ')}（${reason}）`);
+        }
+
+        return cancelledIds;
     }
 
     async _runDelegateTask(taskId, info, options) {
@@ -1135,7 +1794,7 @@ class WorldEyePlugin extends Plugin {
                 ...descLines,
                 `可用工具总数: ${mergedTools.length}`,
                 '',
-                '★ 重要: 请尽可能在同一轮同时调用多个不同的搜索工具（如 google_search、bing_search、bilibili_search 等），它们会被并行执行，这样可以大幅加快搜索速度。不要一个一个串行调用。',
+                '★ 重要: 第 1 轮必须一次性并行发起所有相关搜索工具调用（多引擎交叉取证），它们会被并行执行。第 2 轮只允许补缺口，最后一轮必须输出结论。不要一个接一个串行调用。',
             ].join('\n');
             logToTerminal('info', `${PLUGIN_TAG} 搜索角色已合并 ${searchPluginNames.length} 个插件共 ${mergedTools.length} 个工具`);
         } else {
@@ -1152,11 +1811,12 @@ class WorldEyePlugin extends Plugin {
                 workerLabel: `${options.role || 'general'}-worker-${task.id}`,
                 isTemporaryWorker: true,
             };
-            const runtimeOpts = this._shouldAttachSkillsInventory(options.role, options.pluginName)
-                ? { ...baseRuntime, extraContext: this._skillsInventoryExtraContext() }
+            const extraContext = this._buildSubAgentExtraContext(options.role, options.pluginName, options.taskDescription);
+            const runtimeOpts = extraContext.length > 0
+                ? { ...baseRuntime, extraContext }
                 : baseRuntime;
 
-            const result = await this._subAgent.execute(
+            const outcome = await this._subAgent.executeWithStatus(
                 options.pluginName,
                 options.taskDescription,
                 pluginDescription,
@@ -1164,19 +1824,55 @@ class WorldEyePlugin extends Plugin {
                 task.abortController.signal,
                 runtimeOpts
             );
-            task.result = this._wrapResult('执行报告', options.taskDescription, result);
+            const content = typeof outcome === 'string' ? outcome : (outcome?.content || '');
+            const status = (outcome && typeof outcome === 'object' && outcome.status) ? outcome.status : 'completed';
+
+            if (task.abortController.signal.aborted || status === 'aborted') {
+                task.status = TASK_STATUS.CANCELLED;
+                task.finishedAt = Date.now();
+                task.updatedAt = Date.now();
+                return '任务已被中止。';
+            }
+
+            // v4: 信息缺口类失败 → 转 waiting_input 请主模型补答，而不是直接失败
+            if (status === 'tool_chain_failed' && this._isInfoGapFailure(outcome)) {
+                return this._parkTaskWaitingInput(task, info, options, outcome);
+            }
+
+            if (status === 'llm_error' || status === 'tool_chain_failed') {
+                task.error = String(outcome?.lastToolError || content || '执行失败').slice(0, 500);
+                task.result = content;
+                task.structuredResult = this._buildStructuredResult(task, {
+                    summary: '',
+                    sections: { report: content },
+                    artifacts: [],
+                    error: task.error,
+                });
+                task.status = TASK_STATUS.FAILED;
+                task.finishedAt = Date.now();
+                task.updatedAt = Date.now();
+
+                if (task.mode === 'async') {
+                    this._showProgressSubtitle(`❌ 世界之眼任务失败: ${task.title}`);
+                    this._enqueueResult(task.id, task.title, `执行失败: ${task.error}\n\n[执行详情]\n${content}`);
+                }
+                return `执行失败: ${task.error}`;
+            }
+
+            // completed / max_rounds: 按执行结果处理（max_rounds 内容为总结文本）
+            task.result = this._wrapResult('执行报告', options.taskDescription, content);
             task.structuredResult = this._buildStructuredResult(task, {
-                summary: result,
+                summary: content,
                 sections: {
-                    report: result,
+                    report: content,
                 },
                 artifacts: [],
             });
-            task.status = task.abortController.signal.aborted ? TASK_STATUS.CANCELLED : TASK_STATUS.COMPLETED;
+            task.status = TASK_STATUS.COMPLETED;
             task.finishedAt = Date.now();
             task.updatedAt = Date.now();
 
-            if (task.mode === 'async' && task.status === TASK_STATUS.COMPLETED) {
+            if (task.mode === 'async') {
                 this._showProgressSubtitle(`✅ 世界之眼任务完成: ${task.title}`);
                 this._enqueueResult(task.id, task.title, task.result);
             }
@@ -1207,6 +1903,121 @@ class WorldEyePlugin extends Plugin {
         }
     }
 
+    // ==================== 受阻求助与续跑（v4 主模型直连通讯） ====================
+
+    /** 判断一次失败是否属于「信息缺口」（可由主模型补答后续跑） */
+    _isInfoGapFailure(outcome) {
+        const text = [outcome?.lastToolError || '', outcome?.content || ''].join('\n');
+        return INFO_GAP_RE.test(text);
+    }
+
+    /**
+     * 把任务停靠在 waiting_input 状态：记录续跑上下文、推送求助通知给主模型、挂超时兜底。
+     */
+    _parkTaskWaitingInput(task, info, options, outcome) {
+        const blockReason = String(outcome?.lastToolError || outcome?.content || '缺少继续执行所需的关键信息')
+            .replace(/\s+/g, ' ')
+            .slice(0, 500);
+        task.status = TASK_STATUS.WAITING_INPUT;
+        task.updatedAt = Date.now();
+        task.meta.blockReason = blockReason;
+        task.meta.waitingSince = Date.now();
+        task.meta.resume = { kind: 'delegate', info, options };
+
+        logToTerminal('info', `${PLUGIN_TAG} 任务 ${task.id} 受阻等待补充信息: ${blockReason.slice(0, 120)}`);
+
+        const notice = this._buildWaitingInputNotice(task);
+        if (task.mode === 'async') {
+            this._showProgressSubtitle(`⏸ 世界之眼任务受阻: ${task.title}`);
+            this._enqueueResult(task.id, task.title, notice, 'blocked');
+        }
+        this._scheduleWaitingInputTimeout(task.id);
+        return notice;
+    }
+
+    /** 受阻求助通知文案：指示主模型优先自行补齐，只在上下文没有线索时才轻量问用户。 */
+    _buildWaitingInputNotice(task) {
+        return [
+            '[世界之眼任务受阻·需要补充信息]',
+            `任务ID: ${task.id}`,
+            `任务: ${task.title}`,
+            `受阻原因: ${task.meta.blockReason || '缺少继续执行所需的关键信息'}`,
+            '',
+            '处理规则（按顺序执行，不要征求用户同意）:',
+            '1. 先检查最近对话内容是否已包含所缺信息（准确名称、路径、账号状态等）。',
+            `2. 能补齐 → 立即调用 world_eye_control(action='answer', task_id='${task.id}', answer='<补充信息>')，任务会自动续跑。`,
+            '3. 对话里确实没有 → 才向用户简短提问缺的那一项；不要复述任务过程和内部流程。',
+        ].join('\n');
+    }
+
+    /** 受阻任务超时兜底：超过 _waitingInputTTL 未收到补充信息则转失败。 */
+    _scheduleWaitingInputTimeout(taskId) {
+        this._clearWaitingTimer(taskId);
+        const timer = setTimeout(() => {
+            this._waitingTimers.delete(taskId);
+            const task = this._activeTasks.get(taskId);
+            if (!task || task.status !== TASK_STATUS.WAITING_INPUT) return;
+            task.status = TASK_STATUS.FAILED;
+            task.error = `等待补充信息超时（${Math.round(this._waitingInputTTL / 60000)} 分钟）`;
+            task.finishedAt = Date.now();
+            task.updatedAt = Date.now();
+            logToTerminal('warn', `${PLUGIN_TAG} 任务 ${taskId} 等待补充信息超时，已转失败`);
+        }, this._waitingInputTTL);
+        this._waitingTimers.set(taskId, timer);
+    }
+
+    _clearWaitingTimer(taskId) {
+        const timer = this._waitingTimers.get(taskId);
+        if (timer) {
+            clearTimeout(timer);
+            this._waitingTimers.delete(taskId);
+        }
+    }
+
+    /**
+     * answer 动作：对 waiting_input 任务注入补充信息并重新执行（同一任务记录，attempt+1）。
+     */
+    _resumeWaitingTask(task, answer) {
+        const resume = task.meta.resume;
+        if (!resume || resume.kind !== 'delegate' || !resume.info || !resume.options) {
+            task.status = TASK_STATUS.FAILED;
+            task.error = '受阻任务缺少续跑上下文';
+            task.finishedAt = Date.now();
+            task.updatedAt = Date.now();
+            return `错误: 任务 ${task.id} 缺少续跑上下文，无法继续。请重新提交任务。`;
+        }
+        this._clearWaitingTimer(task.id);
+
+        task.meta.attempt = (task.meta.attempt || 1) + 1;
+        task.meta.blockReason = '';
+        task.status = TASK_STATUS.PENDING;
+        task.updatedAt = Date.now();
+
+        const enrichedOptions = {
+            ...resume.options,
+            taskDescription: [
+                resume.options.taskDescription,
+                '',
+                '[主对话补充信息]',
+                answer,
+            ].join('\n'),
+        };
+        task.taskDescription = enrichedOptions.taskDescription;
+        task.meta.resume = { kind: 'delegate', info: resume.info, options: enrichedOptions };
+
+        logToTerminal('info', `${PLUGIN_TAG} 任务 ${task.id} 收到补充信息，开始续跑（第 ${task.meta.attempt} 次尝试）`);
+        const runner = this._runDelegateTask(task.id, resume.info, enrichedOptions);
+        runner.catch(() => {});
+        return `[任务已续跑] ${task.id} 已带着补充信息重新执行，完成后会自动通知你。请用你的人设语气告诉用户已经继续在办了。`;
+    }
+
+    /**
+     * v4 研究任务入口：按深度分派链路。
+     *   quick    = 合并搜索(≤2 轮) → 摘要式报告                       （2 次子代理运行）
+     *   standard = 合并搜索(≤3 轮) → 审查+撰写合并（至多 1 次补搜 → 终稿）（2-4 次）
+     *   deep     = 规划 → 合并搜索 → 独立审查 → 补搜循环(≤2) → 报告      （4-8 次）
+     * 搜索阶段统一为「1 个子代理合并全部搜索插件工具」，首轮并行多引擎。
+     */
     async _runResearchTask(taskId, options) {
         const task = this._activeTasks.get(taskId);
         if (!task) return '任务不存在';
@@ -1222,157 +2033,11 @@ class WorldEyePlugin extends Plugin {
         }
 
         try {
-            if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在规划...');
-            const planSummary = await this._subAgent.run({
-                role: 'planner',
-                workerLabel: `planner-${task.id}`,
-                isTemporaryWorker: true,
-                taskDescription: `请为研究主题“${options.topic}”生成一份简洁执行计划。要求说明研究重点、搜索角度、审查重点和最终输出目标。研究深度: ${options.depth}`,
-                toolDefinitions: [],
-                signal: task.abortController.signal,
-            });
-
-            if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在搜索资料...');
-            const searchPluginNames = this._pickPluginsByRole('search');
-            const searchContexts = [{ title: '研究计划', content: planSummary }];
-            const searchTasks = [];
-            for (const pluginName of searchPluginNames) {
-                const info = this._delegatedPlugins.get(pluginName);
-                const searchTools = this._getResearchToolsForPlugins([pluginName]);
-                if (!info || searchTools.length === 0) continue;
-                const subtask = { pluginName, role: 'search', status: TASK_STATUS.RUNNING };
-                task.subtasks.push(subtask);
-                searchTasks.push(
-                    this._subAgent.execute(
-                        pluginName,
-                        `围绕主题“${options.topic}”搜索资料，提取关键事实、来源线索、时间信息与争议点。研究深度: ${options.depth}\n执行计划:\n${planSummary}`,
-                        `插件: ${info.metadata.displayName || pluginName}\n说明: ${info.metadata.description || ''}`,
-                        searchTools,
-                        task.abortController.signal,
-                        {
-                            role: 'search',
-                            workerLabel: `search-${pluginName}-${task.id}`,
-                            isTemporaryWorker: true,
-                        }
-                    ).then(result => {
-                        subtask.status = TASK_STATUS.COMPLETED;
-                        subtask.result = result;
-                        return { pluginName, result };
-                    }).catch(error => {
-                        subtask.status = task.abortController.signal.aborted ? TASK_STATUS.CANCELLED : TASK_STATUS.FAILED;
-                        subtask.error = error.message;
-                        return { pluginName, result: `搜索失败: ${error.message}` };
-                    })
-                );
-            }
-
-            const searchResults = await Promise.all(searchTasks);
-            for (const item of searchResults) {
-                searchContexts.push({
-                    title: `搜索结果 - ${item.pluginName}`,
-                    content: item.result,
-                });
-            }
-
-            if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在审查材料...');
-            const reviewSummary = await this._subAgent.run({
-                role: 'reviewer',
-                workerLabel: `reviewer-${task.id}`,
-                isTemporaryWorker: true,
-                taskDescription: `审查关于“${options.topic}”的研究材料，指出高置信结论、低置信结论、缺失点和争议点。`,
-                toolDefinitions: [],
-                signal: task.abortController.signal,
-                extraContext: searchContexts,
-            });
-
-            if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在撰写报告...');
-            const reportSummary = await this._subAgent.run({
-                role: 'reporter',
-                workerLabel: `reporter-${task.id}`,
-                isTemporaryWorker: true,
-                taskDescription: `基于已有材料输出一份关于“${options.topic}”的研究报告。要求包含摘要、主要发现、依据、补充说明。研究深度: ${options.depth}`,
-                toolDefinitions: [],
-                signal: task.abortController.signal,
-                extraContext: [
-                    ...searchContexts,
-                    { title: '审查意见', content: reviewSummary },
-                ],
-            });
-
-            let finalOutput = reportSummary;
-            if (options.output === 'report+persona') {
-                if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在润色输出...');
-                finalOutput = await this._subAgent.run({
-                    role: 'persona',
-                    workerLabel: `persona-${task.id}`,
-                    isTemporaryWorker: true,
-                    taskDescription: `请把下面的研究报告转成更有陪伴感、更生动的人设化回答。必须保持事实不变，允许更自然、拟人化，但不能改变结论。`,
-                    toolDefinitions: [],
-                    signal: task.abortController.signal,
-                    extraContext: [
-                        { title: '研究报告', content: reportSummary },
-                    ],
-                });
-            } else if (options.output === 'summary') {
-                finalOutput = await this._subAgent.run({
-                    role: 'synthesizer',
-                    workerLabel: `synthesizer-${task.id}`,
-                    isTemporaryWorker: true,
-                    taskDescription: `请把下面材料整理成简洁摘要，主题是“${options.topic}”。`,
-                    toolDefinitions: [],
-                    signal: task.abortController.signal,
-                    extraContext: [
-                        { title: '研究报告', content: reportSummary },
-                        { title: '审查意见', content: reviewSummary },
-                    ],
-                });
-            }
-
-            const sections = [
-                `【世界之眼·研究报告】`,
-                `主题: ${options.topic}`,
-                `深度: ${options.depth}`,
-                '',
-                '【研究计划】',
-                planSummary,
-                '',
-                '【审查摘要】',
-                reviewSummary,
-                '',
-                '【研究报告】',
-                reportSummary,
-            ];
-
-            if (options.output === 'report+persona') {
-                sections.push('', '【最终对用户输出建议】', finalOutput);
-            } else if (options.output === 'summary') {
-                sections.push('', '【摘要】', finalOutput);
-            }
-
-            sections.push('', '——以上为世界之眼内部研究结果。请基于这些内容自然回复用户，不要重复报告标签。');
-
-            task.result = sections.join('\n');
-            task.structuredResult = this._buildStructuredResult(task, {
-                summary: finalOutput,
-                sections: {
-                    plan: planSummary,
-                    review: reviewSummary,
-                    report: reportSummary,
-                    final: finalOutput,
-                },
-                artifacts: [],
-            });
-            task.status = task.abortController.signal.aborted ? TASK_STATUS.CANCELLED : TASK_STATUS.COMPLETED;
-            task.finishedAt = Date.now();
-            task.updatedAt = Date.now();
-            this._archiveResearchTask(task);
-
-            if (task.mode === 'async' && task.status === TASK_STATUS.COMPLETED) {
-                this._showProgressSubtitle(`✅ 研究完成: ${options.topic.substring(0, 30)}`);
-                this._enqueueResult(task.id, task.title, task.result);
-            }
-
-            return task.result;
+            const depth = String(options.depth || 'standard').toLowerCase();
+            const parts = depth === 'deep'
+                ? await this._runDeepResearchFlow(task, options)
+                : await this._runFastResearchFlow(task, options, depth);
+            return await this._finalizeResearchSuccess(task, options, parts);
         } catch (error) {
             task.error = error.message;
             task.structuredResult = this._buildStructuredResult(task, {
@@ -1395,6 +2060,445 @@ class WorldEyePlugin extends Plugin {
             this._leaveRole('planner');
             this._scheduleQueuedTasks();
         }
+    }
+
+    /**
+     * 合并所有 search 角色插件的（研究安全）工具与描述，供单个搜索子代理一次性使用。
+     * 返回 { tools, description, pluginName, pluginCount }。
+     */
+    _buildMergedSearchContext() {
+        const searchPluginNames = this._pickPluginsByRole('search');
+        const mergedTools = [];
+        const toolSet = new Set();
+        const descLines = [];
+        let primaryPlugin = '';
+        for (const spName of searchPluginNames) {
+            const spInfo = this._delegatedPlugins.get(spName);
+            if (!spInfo) continue;
+            const safeTools = this._getResearchToolsForPlugins([spName]);
+            if (safeTools.length === 0) continue;
+            if (!primaryPlugin) primaryPlugin = spName;
+            descLines.push(`- ${spInfo.metadata.displayName || spName}: ${spInfo.metadata.description || '无描述'}`);
+            for (const t of safeTools) {
+                const tName = (t.function || t).name || '';
+                if (tName && !toolSet.has(tName)) {
+                    mergedTools.push(t);
+                    toolSet.add(tName);
+                }
+            }
+        }
+        const description = [
+            `搜索角色（已合并 ${descLines.length} 个搜索插件的工具）:`,
+            ...descLines,
+            `可用工具总数: ${mergedTools.length}`,
+            '',
+            '★ 重要: 第 1 轮必须一次性并行发起所有相关搜索工具调用（多引擎交叉取证），它们会被并行执行。第 2 轮只允许补缺口，最后一轮必须输出结论。不要一个接一个串行调用。',
+        ].join('\n');
+        return { tools: mergedTools, description, pluginName: primaryPlugin, pluginCount: descLines.length };
+    }
+
+    /** 搜索任务模板：规划职责已内嵌，不再单独调用 planner（quick/standard）。 */
+    _buildResearchSearchTask(topic, depth) {
+        return [
+            `围绕主题“${topic}”联网搜索资料。研究深度: ${depth}`,
+            '',
+            '执行方法:',
+            '1. 先识别主题的核心问题与关键实体（人物/作品/产品/版本/时间）。',
+            '2. 第 1 轮一次性并行调用所有可用的搜索工具，多引擎交叉取证。',
+            '3. 提取关键事实、来源线索、时间信息与争议点；信息不足时下一轮只补缺口。',
+            '4. 输出保留: 要点、来源、时间、争议点、信息缺口。不把猜测写成事实。',
+        ].join('\n');
+    }
+
+    /** quick 深度的摘要式报告任务。 */
+    _buildQuickReportTask(topic) {
+        return `基于已有搜索材料，用紧凑篇幅总结“${topic}”: 摘要 + 主要发现 + 来源线索 + 待确认项。不需要长篇报告，不要输出【需要补搜】。`;
+    }
+
+    /** standard 深度的「审查+撰写合并」任务：自查通过直接成稿，严重缺口输出【需要补搜】。 */
+    _buildReviewedReportTask(topic, depth, { finalPass = false } = {}) {
+        const gapRule = finalPass
+            ? '这是终稿轮: 即使仍有缺口也不要再输出【需要补搜】，把未解决问题标注为低置信/待确认后直接成稿。'
+            : '自查发现严重缺口时（核心问题未回答、核心结论无来源、关键事实冲突、只有单一二手来源、答非所问），输出【需要补搜】并列出: 补搜原因、补搜目标、建议关键词/来源方向，然后停止，不要写正式报告；否则直接输出报告。';
+        return [
+            `基于已有搜索材料，产出关于“${topic}”的研究报告。研究深度: ${depth}`,
+            '',
+            '第一步先在内部完成审查自查（不必输出过程）:',
+            '- 核心问题是否已被回答？结论是否有来源支撑？',
+            '- 关键时间、版本、人物、数值是否互相矛盾？',
+            '- 是否过度依赖单一二手来源？',
+            gapRule,
+            '',
+            '报告格式: 摘要 → 主要发现（按高置信/低置信/推测分档）→ 依据与来源 → 补充说明。',
+        ].join('\n');
+    }
+
+    /**
+     * v4 快速研究链（quick/standard）。
+     * 返回 { planSummary, reviewHistory, repairSummaries, reportSummary }。
+     */
+    async _runFastResearchFlow(task, options, depth) {
+        const signal = task.abortController.signal;
+        const search = this._buildMergedSearchContext();
+        if (search.tools.length === 0) {
+            throw new Error('没有可用于研究任务的搜索工具');
+        }
+
+        // 1) 搜索：单子代理合并全部搜索插件工具，首轮并行多引擎
+        if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在搜索资料...');
+        const searchSubtask = { pluginName: search.pluginName, role: 'search', status: TASK_STATUS.RUNNING };
+        task.subtasks.push(searchSubtask);
+        const searchResult = await this._subAgent.execute(
+            search.pluginName,
+            this._buildResearchSearchTask(options.topic, depth),
+            search.description,
+            search.tools,
+            signal,
+            {
+                role: 'search',
+                workerLabel: `search-${task.id}`,
+                isTemporaryWorker: true,
+                maxIterations: depth === 'quick' ? 2 : 3,
+            }
+        );
+        searchSubtask.status = TASK_STATUS.COMPLETED;
+        searchSubtask.result = searchResult;
+        if (signal.aborted) throw new Error('研究任务已被中止。');
+
+        const searchContexts = [
+            { title: '搜索结果', content: typeof searchResult === 'string' ? searchResult : String(searchResult || ''), fromRole: 'search' },
+        ];
+
+        // 2) 审查+撰写合并（quick 直接摘要成稿；standard 允许一次【需要补搜】返工）
+        if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在撰写报告...');
+        this._logHandoff('search', 'reporter');
+        let reportSummary = await this._subAgent.run({
+            role: 'reporter',
+            workerLabel: `reporter-${task.id}`,
+            isTemporaryWorker: true,
+            taskDescription: depth === 'quick'
+                ? this._buildQuickReportTask(options.topic)
+                : this._buildReviewedReportTask(options.topic, depth, { finalPass: false }),
+            toolDefinitions: [],
+            signal,
+            extraContext: searchContexts,
+        });
+        if (signal.aborted) throw new Error('研究任务已被中止。');
+
+        const repairSummaries = [];
+        if (depth !== 'quick') {
+            const repairDecision = this._parseResearchRepairRequest(reportSummary);
+            if (repairDecision.needsRepair) {
+                task.meta.researchRepairRounds = 1;
+                if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 报告要求补搜(1/1)...');
+                logToTerminal('info', `${PLUGIN_TAG} 报告自查要求补搜（standard 至多 1 轮）`);
+                this._logHandoff('reporter', 'search');
+
+                const repairSubtask = { pluginName: search.pluginName, role: 'search', status: TASK_STATUS.RUNNING, repairRound: 1 };
+                task.subtasks.push(repairSubtask);
+                const repairResult = await this._subAgent.execute(
+                    search.pluginName,
+                    this._buildResearchRepairSearchTask(options.topic, depth, 1, repairDecision.requestText),
+                    search.description,
+                    search.tools,
+                    signal,
+                    {
+                        role: 'search',
+                        workerLabel: `repair-search-${task.id}`,
+                        isTemporaryWorker: true,
+                        maxIterations: 2,
+                    }
+                );
+                repairSubtask.status = TASK_STATUS.COMPLETED;
+                repairSubtask.result = repairResult;
+                if (signal.aborted) throw new Error('研究任务已被中止。');
+
+                const repairText = typeof repairResult === 'string' ? repairResult : String(repairResult || '');
+                repairSummaries.push({ round: 1, result: repairText });
+                searchContexts.push({ title: '补搜结果', content: repairText, fromRole: 'search' });
+
+                if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在撰写终稿...');
+                this._logHandoff('search', 'reporter');
+                reportSummary = await this._subAgent.run({
+                    role: 'reporter',
+                    workerLabel: `reporter-final-${task.id}`,
+                    isTemporaryWorker: true,
+                    taskDescription: this._buildReviewedReportTask(options.topic, depth, { finalPass: true }),
+                    toolDefinitions: [],
+                    signal,
+                    extraContext: [
+                        ...searchContexts,
+                        { title: '上一轮补搜要求', content: repairDecision.requestText, fromRole: 'reporter' },
+                    ],
+                });
+                if (signal.aborted) throw new Error('研究任务已被中止。');
+            }
+        }
+
+        return {
+            planSummary: '（v4 快速链路: 规划已内嵌到搜索任务模板，无独立规划步骤。）',
+            reviewHistory: [],
+            repairSummaries,
+            reportSummary: typeof reportSummary === 'string' ? reportSummary : String(reportSummary || ''),
+        };
+    }
+
+    /**
+     * v4 深度研究链（deep）：planner → 合并搜索 → 独立审查 → 补搜循环(≤2) → 报告。
+     * 返回 { planSummary, reviewHistory, repairSummaries, reportSummary }。
+     */
+    async _runDeepResearchFlow(task, options) {
+        const signal = task.abortController.signal;
+        const depth = 'deep';
+        const search = this._buildMergedSearchContext();
+        if (search.tools.length === 0) {
+            throw new Error('没有可用于研究任务的搜索工具');
+        }
+
+        if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在规划...');
+        const planSummary = await this._subAgent.run({
+            role: 'planner',
+            workerLabel: `planner-${task.id}`,
+            isTemporaryWorker: true,
+            taskDescription: `请为研究主题“${options.topic}”生成一份简洁执行计划。要求说明研究重点、搜索角度、审查重点和最终输出目标。研究深度: ${depth}`,
+            toolDefinitions: [],
+            signal,
+        });
+        if (signal.aborted) throw new Error('研究任务已被中止。');
+
+        if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在搜索资料...');
+        this._logHandoff('planner', 'search');
+        const searchSubtask = { pluginName: search.pluginName, role: 'search', status: TASK_STATUS.RUNNING };
+        task.subtasks.push(searchSubtask);
+        const searchResult = await this._negotiateTransition({
+            upstreamRole: 'planner',
+            downstreamRole: 'search',
+            downstreamTask: this._buildResearchSearchTask(options.topic, depth),
+            downstreamTools: search.tools,
+            downstreamExtraContext: [{ title: '研究计划', content: planSummary, fromRole: 'planner' }],
+            downstreamPluginName: search.pluginName,
+            downstreamPluginDescription: search.description,
+            upstreamRefineContext: [{ title: '主题', content: options.topic }],
+            signal,
+            workerLabelPrefix: `search-${task.id}`,
+        });
+        searchSubtask.status = TASK_STATUS.COMPLETED;
+        searchSubtask.result = searchResult;
+        if (signal.aborted) throw new Error('研究任务已被中止。');
+
+        const searchContexts = [
+            { title: '研究计划', content: planSummary, fromRole: 'planner' },
+            { title: '搜索结果', content: searchResult, fromRole: 'search' },
+        ];
+
+        if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在审查材料...');
+        this._logHandoff('search', 'reviewer');
+        let reviewSummary = await this._negotiateTransition({
+            upstreamRole: 'search',
+            downstreamRole: 'reviewer',
+            downstreamTask: this._buildResearchReviewTask(options.topic, depth),
+            downstreamTools: [],
+            downstreamExtraContext: searchContexts,
+            upstreamRefineContext: [{ title: '研究计划', content: planSummary, fromRole: 'planner' }],
+            signal,
+            workerLabelPrefix: `reviewer-${task.id}`,
+        });
+        if (signal.aborted) throw new Error('研究任务已被中止。');
+
+        const reviewHistory = [{ round: 0, result: reviewSummary }];
+        const repairSummaries = [];
+        const maxRepairRounds = this._getResearchRepairMaxRounds(depth);
+        for (let repairRound = 1; repairRound <= maxRepairRounds; repairRound++) {
+            const repairDecision = this._parseResearchRepairRequest(reviewSummary);
+            if (!repairDecision.needsRepair) break;
+
+            task.meta.researchRepairRounds = repairRound;
+            if (task.mode === 'async') this._showProgressSubtitle(`🌍 研究进度: 审查要求补搜(${repairRound}/${maxRepairRounds})...`);
+            logToTerminal('info', `${PLUGIN_TAG} 审查要求补搜，第 ${repairRound}/${maxRepairRounds} 轮`);
+            this._logHandoff('reviewer', 'search');
+
+            const repairSubtask = { pluginName: search.pluginName, role: 'search', status: TASK_STATUS.RUNNING, repairRound };
+            task.subtasks.push(repairSubtask);
+            const repairResult = await this._negotiateTransition({
+                upstreamRole: 'reviewer',
+                downstreamRole: 'search',
+                downstreamTask: this._buildResearchRepairSearchTask(options.topic, depth, repairRound, repairDecision.requestText),
+                downstreamTools: search.tools,
+                downstreamExtraContext: [
+                    { title: '研究计划', content: planSummary, fromRole: 'planner' },
+                    { title: `审查补搜要求 - 第 ${repairRound} 轮`, content: repairDecision.requestText, fromRole: 'reviewer' },
+                ],
+                downstreamPluginName: search.pluginName,
+                downstreamPluginDescription: search.description,
+                upstreamRefineContext: searchContexts.slice(1),
+                signal,
+                workerLabelPrefix: `repair-search-${task.id}-r${repairRound}`,
+            });
+            repairSubtask.status = TASK_STATUS.COMPLETED;
+            repairSubtask.result = repairResult;
+            if (signal.aborted) throw new Error('研究任务已被中止。');
+
+            const repairText = typeof repairResult === 'string' ? repairResult : String(repairResult || '');
+            repairSummaries.push({ round: repairRound, result: repairText });
+            searchContexts.push({ title: `补搜结果 第 ${repairRound} 轮`, content: repairText, fromRole: 'search' });
+
+            if (task.mode === 'async') this._showProgressSubtitle(`🌍 研究进度: 正在复审补搜结果(${repairRound}/${maxRepairRounds})...`);
+            this._logHandoff('search', 'reviewer');
+            reviewSummary = await this._negotiateTransition({
+                upstreamRole: 'search',
+                downstreamRole: 'reviewer',
+                downstreamTask: this._buildResearchReviewTask(
+                    options.topic,
+                    depth,
+                    repairRound,
+                    repairDecision.requestText,
+                    repairRound >= maxRepairRounds
+                ),
+                downstreamTools: [],
+                downstreamExtraContext: [
+                    ...searchContexts,
+                    { title: `上一轮审查意见`, content: reviewHistory[reviewHistory.length - 1].result, fromRole: 'reviewer' },
+                ],
+                upstreamRefineContext: searchContexts.slice(1),
+                signal,
+                workerLabelPrefix: `reviewer-${task.id}-r${repairRound}`,
+            });
+            if (signal.aborted) throw new Error('研究任务已被中止。');
+            reviewHistory.push({ round: repairRound, result: reviewSummary });
+        }
+
+        const reviewContextBlocks = reviewHistory.map(item => ({
+            title: item.round === 0 ? '初次审查意见' : `第 ${item.round} 轮复审意见`,
+            content: item.result,
+            fromRole: 'reviewer',
+        }));
+
+        if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在撰写报告...');
+        this._logHandoff('reviewer', 'reporter');
+        const reportSummary = await this._negotiateTransition({
+            upstreamRole: 'reviewer',
+            downstreamRole: 'reporter',
+            downstreamTask: `基于已有材料输出一份关于“${options.topic}”的研究报告。要求包含摘要、主要发现、依据、补充说明。研究深度: ${depth}`,
+            downstreamTools: [],
+            downstreamExtraContext: [
+                ...searchContexts,
+                ...reviewContextBlocks,
+            ],
+            upstreamRefineContext: searchContexts.slice(1), // 不含 plan
+            signal,
+            workerLabelPrefix: `reporter-${task.id}`,
+        });
+        if (signal.aborted) throw new Error('研究任务已被中止。');
+
+        return { planSummary, reviewHistory, repairSummaries, reportSummary };
+    }
+
+    /**
+     * 研究成功收尾（三档深度共用）：可选输出转换（summary / report+persona 口语化改写）、
+     * 组装内部结果、写 structuredResult、归档、异步投递。
+     */
+    async _finalizeResearchSuccess(task, options, parts) {
+        const signal = task.abortController.signal;
+        const { planSummary, reviewHistory, repairSummaries, reportSummary } = parts;
+        const reviewSummary = reviewHistory.length > 0 ? reviewHistory[reviewHistory.length - 1].result : '';
+
+        let finalOutput = reportSummary;
+        if (options.output === 'report+persona') {
+            if (task.mode === 'async') this._showProgressSubtitle('🌍 研究进度: 正在做口语化改写...');
+            this._logHandoff('reporter', 'persona');
+            finalOutput = await this._subAgent.run({
+                role: 'persona',
+                workerLabel: `persona-${task.id}`,
+                isTemporaryWorker: true,
+                taskDescription: '请把下面的研究报告改写成适合口头转述的自然中文。必须保持事实、结论和来源边界不变，只调整表达方式，删掉报告腔。',
+                toolDefinitions: [],
+                signal,
+                extraContext: [
+                    { title: '研究报告', content: reportSummary, fromRole: 'reporter' },
+                ],
+            });
+            if (signal.aborted) throw new Error('研究任务已被中止。');
+        } else if (options.output === 'summary') {
+            this._logHandoff('reporter', 'synthesizer');
+            finalOutput = await this._subAgent.run({
+                role: 'synthesizer',
+                workerLabel: `synthesizer-${task.id}`,
+                isTemporaryWorker: true,
+                taskDescription: `请把下面材料整理成简洁摘要，主题是“${options.topic}”。`,
+                toolDefinitions: [],
+                signal,
+                extraContext: [
+                    { title: '研究报告', content: reportSummary, fromRole: 'reporter' },
+                    ...(reviewSummary ? [{ title: '审查意见', content: reviewSummary, fromRole: 'reviewer' }] : []),
+                ],
+            });
+            if (signal.aborted) throw new Error('研究任务已被中止。');
+        }
+
+        const internalSections = [
+            `【世界之眼·研究报告】`,
+            `主题: ${options.topic}`,
+            `深度: ${options.depth}`,
+            '',
+            '【研究计划】',
+            planSummary,
+            '',
+            '【审查摘要】',
+            reviewHistory.length > 0
+                ? reviewHistory.map(item => `【${item.round === 0 ? '初次审查' : `第 ${item.round} 轮复审`}】\n${item.result}`).join('\n\n')
+                : '（快速链路: 审查自查已合并进报告撰写步骤。）',
+            '',
+            '【补搜摘要】',
+            repairSummaries.length > 0
+                ? repairSummaries.map(item => `【第 ${item.round} 轮补搜】\n${item.result}`).join('\n\n')
+                : '未触发补搜。',
+            '',
+            '【研究报告】',
+            reportSummary,
+        ];
+
+        if (options.output === 'report+persona') {
+            internalSections.push('', '【最终对用户输出建议】', finalOutput);
+        } else if (options.output === 'summary') {
+            internalSections.push('', '【摘要】', finalOutput);
+        }
+
+        internalSections.push('', '——以上为世界之眼内部研究结果。仅供 raw_result / 归档调试使用，不应直接暴露给主对话。');
+
+        const internalResult = internalSections.join('\n');
+        const publicBody = this._sanitizePersonaArtifacts(finalOutput || reportSummary || '').trim();
+        task.result = [
+            '【最终研究结果】',
+            `主题: ${options.topic}`,
+            '',
+            publicBody || '研究已完成，但最终输出为空。请查看 raw_result 获取内部结果。',
+            '',
+            '——以上为最终结果。请基于这些内容自然回复用户，不要提及审查、补搜、内部流程、世界之眼或任何内部 agent 名。',
+        ].join('\n');
+        task.structuredResult = this._buildStructuredResult(task, {
+            summary: publicBody,
+            sections: {
+                plan: planSummary,
+                review: reviewSummary,
+                review_history: reviewHistory,
+                repair_rounds: repairSummaries,
+                report: reportSummary,
+                final: finalOutput,
+            },
+            artifacts: [],
+            internal_result: internalResult,
+        });
+        task.status = signal.aborted ? TASK_STATUS.CANCELLED : TASK_STATUS.COMPLETED;
+        task.finishedAt = Date.now();
+        task.updatedAt = Date.now();
+        this._archiveResearchTask(task);
+
+        if (task.mode === 'async' && task.status === TASK_STATUS.COMPLETED) {
+            this._showProgressSubtitle(`✅ 研究完成: ${options.topic.substring(0, 30)}`);
+            this._enqueueResult(task.id, task.title, task.result);
+        }
+
+        return task.result;
     }
 
     _pickPluginsByRole(role) {
@@ -1428,6 +2532,9 @@ class WorldEyePlugin extends Plugin {
         if (role === 'app') {
             return names.filter(name => ['windows-app-launcher'].includes(name));
         }
+        if (role === 'skills') {
+            return names.filter(name => ['myneuro-plugin-skills'].includes(name));
+        }
         return names;
     }
 
@@ -1444,6 +2551,82 @@ class WorldEyePlugin extends Plugin {
 
     _getResearchToolsForPlugins(pluginNames) {
         return this._getToolsForPlugins(pluginNames).filter(tool => this._isResearchSafeTool(tool));
+    }
+
+    _getResearchRepairMaxRounds(depth) {
+        const normalized = String(depth || 'standard').toLowerCase();
+        if (normalized === 'deep') return 2;
+        return 1;
+    }
+
+    _parseResearchRepairRequest(reviewText) {
+        const raw = typeof reviewText === 'string' ? reviewText : String(reviewText || '');
+        const factual = SubAgent.stripThinkingSnippet(raw).trim();
+        const text = factual || raw;
+        if (!/【\s*需要补搜\s*】/.test(text)) {
+            return { needsRepair: false, requestText: '' };
+        }
+
+        let requestText = text;
+        const markerIndex = text.search(/【\s*需要补搜\s*】/);
+        if (markerIndex >= 0) {
+            requestText = text.slice(markerIndex).trim();
+        }
+        requestText = requestText.replace(/【\s*审查通过\s*】[\s\S]*$/g, '').trim();
+        return {
+            needsRepair: true,
+            requestText: requestText || '【需要补搜】审查认为现有材料存在严重缺口，但未给出具体补搜目标。请优先补充官方来源、一手来源和独立来源。',
+        };
+    }
+
+    _buildResearchReviewTask(topic, depth, repairRound = 0, previousRepairRequest = '', isFinalReview = false) {
+        const stage = repairRound > 0 ? `第 ${repairRound} 轮补搜后的复审` : '初次审查';
+        const finalRule = isFinalReview
+            ? '这已经是最后一轮复审。即使仍有缺口，也不要再输出【需要补搜】；请输出【审查通过】，并把未解决问题明确标为低置信/待确认。'
+            : '如果存在严重缺口，必须输出【需要补搜】并写清楚补搜目标；如果资料足够进入报告阶段，必须输出【审查通过】。';
+        const previous = previousRepairRequest
+            ? `\n上一轮补搜要求:\n${previousRepairRequest}\n`
+            : '';
+        return [
+            `审查关于“${topic}”的研究材料。当前阶段: ${stage}。研究深度: ${depth}`,
+            previous,
+            '你的输出必须在事实结果层明确包含以下两个标记之一，且只能二选一:',
+            '1. 【审查通过】资料足够进入报告阶段。随后列出高置信结论、低置信结论、争议点和写报告注意事项。',
+            '2. 【需要补搜】资料存在严重缺口。随后必须列出: 补搜原因、补搜目标、建议关键词/来源方向。',
+            '',
+            '严重缺口包括:',
+            '- 用户问题的核心没有被回答。',
+            '- 核心结论缺少来源。',
+            '- 关键时间、版本、人物、地点或数值互相矛盾。',
+            '- 只有营销号、论坛传言或单一二手来源，缺少官方/一手/独立来源。',
+            '- 搜索结果明显太浅、过时或答非所问。',
+            '',
+            '普通缺口不必返工，可在【审查通过】后标低置信，例如细节不全、非关键来源不足、轻微表述差异。',
+            finalRule,
+            '',
+            '输出格式示例:',
+            '【审查通过】\n- 高置信结论: ...\n- 低置信/待确认: ...\n- 报告写作注意: ...',
+            '',
+            '或:',
+            '【需要补搜】\n- 原因: ...\n- 补搜目标: ...\n- 建议关键词/来源: ...',
+        ].filter(Boolean).join('\n');
+    }
+
+    _buildResearchRepairSearchTask(topic, depth, repairRound, repairRequest) {
+        return [
+            `这是第 ${repairRound} 轮返工补搜。原始研究主题: “${topic}”。研究深度: ${depth}`,
+            '',
+            '审查 Agent 认为现有材料存在严重缺口，要求补搜。你只需要解决审查指出的缺口，不要重写报告。',
+            '',
+            '审查补搜要求:',
+            repairRequest,
+            '',
+            '补搜规则:',
+            '- 优先搜索官方公告、官网、更新日志、作者/厂商/平台一手来源。',
+            '- 若没有官方来源，补充视频实录、截图、可信社区帖或至少两个相互独立来源。',
+            '- 避免重复已有材料；重点补齐审查指出的缺口。',
+            '- 输出必须说明每条补充材料解决了哪个缺口，并保留来源线索、时间信息和置信度。',
+        ].join('\n');
     }
 
     _isResearchSafeTool(tool) {
@@ -1646,26 +2829,66 @@ class WorldEyePlugin extends Plugin {
             const sub = findSubtask(step.id);
             if (sub) sub.status = TASK_STATUS.RUNNING;
 
-            logToTerminal('info', `${PLUGIN_TAG} 复合步骤 [${step.id}] 开始 (角色: ${step.role})`);
+            logToTerminal('info', `${PLUGIN_TAG} 复合步骤 [${step.id}] 开始 (${step.role})`);
 
-            // 构建任务描述，注入上游输出
+            // 收集上游 fromRole 信息 + 注入到任务描述
             let enrichedTask = step.task;
+            const upstreamHandoffContext = []; // [{title, content, fromRole}]
+            let primaryUpstreamRole = null; // 第一个 inputBindings 来源作为协商时的紧邻上游
             if (step.inputBindings) {
                 for (const [paramName, sourceKey] of Object.entries(step.inputBindings)) {
                     const upstream = outputs[sourceKey] || '';
-                    if (upstream) {
+                    if (!upstream) continue;
+                    // 找到产生 sourceKey 的步骤
+                    const srcStep = steps.find(s => s.outputKey === sourceKey);
+                    const srcRole = srcStep?.role;
+                    if (srcRole && ROLE_PROMPT_BLOCKS[srcRole]) {
+                        if (!primaryUpstreamRole) primaryUpstreamRole = srcRole;
+                        upstreamHandoffContext.push({
+                            title: `[${paramName}] 来自步骤 ${srcStep.id}`,
+                            content: upstream,
+                            fromRole: srcRole,
+                        });
+                        this._logHandoff(srcRole, step.role, upstream);
+                    } else {
+                        // 没有 fromRole 信息的简化注入
                         enrichedTask += `\n\n[${paramName} — 来自上游步骤的输出]:\n${upstream}`;
                     }
                 }
             }
 
-            const promise = this._executeCompositeStep(step, enrichedTask, task.abortController.signal)
-                .then(result => {
-                    outputs[step.outputKey] = result;
-                    stepStatus[step.id] = 'completed';
+            const promise = this._executeCompositeStep(step, enrichedTask, task.abortController.signal, {
+                upstreamHandoffContext,
+                primaryUpstreamRole,
+            })
+                .then(rawResult => {
+                    // rawResult 现在统一是 { status, content, lastToolError? } 结构体
+                    const isObj = rawResult && typeof rawResult === 'object';
+                    const status = isObj && rawResult.status ? rawResult.status : 'completed';
+                    const content = isObj ? (rawResult.content || '') : String(rawResult || '');
                     const sub = findSubtask(step.id);
-                    if (sub) { sub.status = TASK_STATUS.COMPLETED; sub.result = result; }
-                    logToTerminal('info', `${PLUGIN_TAG} 复合步骤 [${step.id}] 完成`);
+
+                    if (status === 'completed') {
+                        outputs[step.outputKey] = content;
+                        stepStatus[step.id] = 'completed';
+                        if (sub) { sub.status = TASK_STATUS.COMPLETED; sub.result = content; }
+                        logToTerminal('info', `${PLUGIN_TAG} 复合步骤 [${step.id}] 完成`);
+                        return;
+                    }
+
+                    // 非 completed 一律算失败，不让下游误以为有可用结果
+                    const reason = ({
+                        max_rounds: '达到最大轮次仍未完成',
+                        tool_chain_failed: '工具链连续失败',
+                        aborted: '步骤被中止',
+                        llm_error: 'LLM 调用失败',
+                    })[status] || `异常状态: ${status}`;
+                    const detail = rawResult && rawResult.lastToolError ? ` — ${rawResult.lastToolError}` : '';
+                    const errMsg = `${reason}${detail}`;
+                    outputs[step.outputKey] = `步骤失败（${reason}）${detail}\n\n[最后产出片段]\n${content}`.trim();
+                    stepStatus[step.id] = 'failed';
+                    if (sub) { sub.status = TASK_STATUS.FAILED; sub.error = errMsg; sub.result = content; }
+                    logToTerminal('warn', `${PLUGIN_TAG} 复合步骤 [${step.id}] 未真正完成 (status=${status})${detail}`);
                 })
                 .catch(error => {
                     outputs[step.outputKey] = `步骤失败: ${error.message}`;
@@ -1758,10 +2981,61 @@ class WorldEyePlugin extends Plugin {
         }
     }
 
-    async _executeCompositeStep(step, enrichedTask, signal) {
+    /**
+     * 执行一个复合步骤。
+     * 返回结构体 { status, content, lastToolError? }：
+     *   - status='completed'  正常完成
+     *   - status='max_rounds' 达到最大轮次但无明显工具失败
+     *   - status='tool_chain_failed' 工具链失败（最后一轮工具全失败 / app 角色匹配失败 / 协商最后一轮仍提问）
+     *   - status='aborted'    被中止
+     *   - status='llm_error'  LLM 调用本身失败
+     */
+    async _executeCompositeStep(step, enrichedTask, signal, opts = {}) {
         const plugins = step.plugins || [];
         const tools = this._getToolsForPlugins(plugins);
+        const upstreamHandoffContext = Array.isArray(opts.upstreamHandoffContext) ? opts.upstreamHandoffContext : [];
+        const primaryUpstreamRole = opts.primaryUpstreamRole || null;
 
+        // 合并：上游 handoff 上下文 + 角色额外上下文（skills 目录 / app 约束等）
+        const extraContext = [
+            ...upstreamHandoffContext,
+            ...this._buildSubAgentExtraContext(step.role, plugins[0], enrichedTask),
+        ];
+
+        // 有紧邻上游 → 走协商交接（最多 2 轮 Q&A），否则直接执行
+        if (primaryUpstreamRole) {
+            if (tools.length > 0) {
+                const pluginName = plugins[0];
+                const info = this._delegatedPlugins.get(pluginName);
+                const pluginDesc = info
+                    ? `插件: ${info.metadata.displayName || pluginName}\n说明: ${info.metadata.description || ''}`
+                    : `插件: ${pluginName}`;
+                return await this._negotiateTransitionDetailed({
+                    upstreamRole: primaryUpstreamRole,
+                    downstreamRole: step.role,
+                    downstreamTask: enrichedTask,
+                    downstreamTools: tools,
+                    downstreamExtraContext: extraContext,
+                    downstreamPluginName: pluginName,
+                    downstreamPluginDescription: pluginDesc,
+                    upstreamRefineContext: upstreamHandoffContext,
+                    signal,
+                    workerLabelPrefix: `composite-${step.id}`,
+                });
+            }
+            return await this._negotiateTransitionDetailed({
+                upstreamRole: primaryUpstreamRole,
+                downstreamRole: step.role,
+                downstreamTask: enrichedTask,
+                downstreamTools: [],
+                downstreamExtraContext: extraContext,
+                upstreamRefineContext: upstreamHandoffContext,
+                signal,
+                workerLabelPrefix: `composite-${step.id}`,
+            });
+        }
+
+        // 无上游 → 直接执行
         if (tools.length > 0) {
             const pluginName = plugins[0];
             const info = this._delegatedPlugins.get(pluginName);
@@ -1773,10 +3047,10 @@ class WorldEyePlugin extends Plugin {
                 workerLabel: `composite-${step.id}`,
                 isTemporaryWorker: true,
             };
-            const compositeOpts = this._shouldAttachSkillsInventory(step.role, pluginName)
-                ? { ...baseCompositeOpts, extraContext: this._skillsInventoryExtraContext() }
+            const compositeOpts = extraContext.length > 0
+                ? { ...baseCompositeOpts, extraContext }
                 : baseCompositeOpts;
-            return await this._subAgent.execute(
+            return await this._subAgent.executeWithStatus(
                 pluginName,
                 enrichedTask,
                 pluginDesc,
@@ -1785,7 +3059,7 @@ class WorldEyePlugin extends Plugin {
                 compositeOpts
             );
         } else {
-            return await this._subAgent.run({
+            return await this._subAgent.runWithStatus({
                 role: step.role,
                 taskDescription: enrichedTask,
                 toolDefinitions: [],
@@ -2028,6 +3302,32 @@ class WorldEyePlugin extends Plugin {
         return [{ title: '可用 Skills 目录', content }];
     }
 
+    _appExecutionExtraContext(taskDescription = '') {
+        const content = [
+            '应用启动任务的名称处理规则:',
+            '1. 优先使用用户原文中的应用名、游戏名、快捷方式名或可执行文件名，不要自行改写为近义词。',
+            '2. 不要把自动翻译、猜测的英文名、猜测的中文别名、其他相似游戏名当作新的启动目标。',
+            '3. 若当前名称无法精确匹配本机应用，必须停止继续尝试，不允许连续更换多个候选名。',
+            '4. 匹配失败时，直接返回让上层 AI 向用户确认准确名称，尤其是桌面显示名称、英文名称、快捷方式名称或 exe 名称。',
+        ];
+        if (taskDescription && taskDescription.trim()) {
+            content.push('');
+            content.push(`本次任务原始描述: ${taskDescription.trim()}`);
+        }
+        return [{ title: '应用名称匹配约束', content: content.join('\n') }];
+    }
+
+    _buildSubAgentExtraContext(role, pluginName, taskDescription = '') {
+        const contexts = [];
+        if (this._shouldAttachSkillsInventory(role, pluginName)) {
+            contexts.push(...this._skillsInventoryExtraContext());
+        }
+        if (role === 'app') {
+            contexts.push(...this._appExecutionExtraContext(taskDescription));
+        }
+        return contexts;
+    }
+
     _shouldAttachSkillsInventory(role, pluginName) {
         if (role === 'skills') return true;
         if (pluginName === 'myneuro-plugin-skills') return true;
@@ -2043,7 +3343,9 @@ class WorldEyePlugin extends Plugin {
             role: 'planner',
             taskDescription: prompt,
             toolDefinitions: [],
-            signal: AbortSignal.timeout(30000),
+            // 规划器要做完整 DAG 拆分，prompt 很长；尊重用户配置的超时（默认 120s）
+            // 同时给一个上限以防失控：取配置值与 180s 中的较小者
+            signal: AbortSignal.timeout(Math.min(180000, Math.max(30000, this._getConfiguredLlmTimeoutMs()))),
             workerLabel: 'dynamic-planner',
             isTemporaryWorker: true,
         });
@@ -2132,9 +3434,15 @@ class WorldEyePlugin extends Plugin {
             '- 如果某步骤需要用到上游步骤的结果，必须在 inputBindings 中声明，并在 task 中提到 [参数名] 占位符',
             `- 小红书技能目录绝对路径: ${skillsDir}`,
             '',
-            '## 输出格式',
-            '严格输出 JSON 数组，不要加任何额外文字、解释或 markdown 标记。',
-            '如果你认为这个目标用单步就能完成，输出空数组 []。',
+            '## 输出格式（两段式，重要）',
+            '第 1 段（可选，≤ 2 句话）：用你的思考方式写下当下判断。例如：「目标含截屏+发布两步，截屏走 code，发布走 skills；并行的话发布要等」。',
+            '第 2 段（必需）：用单独一行 "---" 分隔后，输出严格的 JSON 数组（不要加 markdown 代码块、不要 ```json、不要任何额外注释）。',
+            '如果你认为这个目标用单步就能完成，第 2 段输出空数组 []。',
+            '',
+            '完整示例（请严格模仿这个形态）:',
+            '终局是发布小红书图文，需要截屏 + 发布两步；截屏失败时整盘崩，所以截屏要单独成步。',
+            '---',
+            '[{"id":"capture","role":"code","plugins":["code-executor"],"task":"...","dependsOn":[],"outputKey":"image"},{"id":"publish","role":"skills","plugins":["myneuro-plugin-skills"],"task":"...","dependsOn":["capture"],"outputKey":"result","inputBindings":{"image":"image"}}]',
             '',
             '## 用户目标',
             goal,
@@ -2146,8 +3454,10 @@ class WorldEyePlugin extends Plugin {
             throw new Error('规划器未返回有效输出');
         }
 
+        // 先剥离开头的思考片段（如果有的话，已在 sub-agent.js 的 run() 中日志打印过）
+        let jsonStr = SubAgent.stripThinkingSnippet(rawOutput).trim();
+
         // 提取 JSON（可能被 markdown 代码块包裹）
-        let jsonStr = rawOutput.trim();
         const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
         if (codeBlockMatch) {
             jsonStr = codeBlockMatch[1].trim();
@@ -2364,7 +3674,7 @@ class WorldEyePlugin extends Plugin {
                 `- 创建时间: ${new Date(task.createdAt).toISOString()}`,
                 `- 完成时间: ${new Date(task.finishedAt || Date.now()).toISOString()}`,
                 '',
-                task.result || '',
+                task.structuredResult?.internal_result || task.result || '',
                 '',
                 '## Structured Result',
                 '```json',
@@ -2382,14 +3692,23 @@ class WorldEyePlugin extends Plugin {
     }
 
     _getConfiguredPluginsForRole(role) {
-        const raw = this._pluginConfig?.role_plugin_bindings?.[role] || '';
-        if (!raw || typeof raw !== 'string') return [];
-        return raw.split(',').map(item => item.trim()).filter(Boolean);
+        // 新 schema 优先：roles[role].plugins（逗号分隔字符串）
+        const newRolesPlugins = this._pluginConfig?.roles?.[role]?.plugins;
+        if (typeof newRolesPlugins === 'string' && newRolesPlugins.trim()) {
+            return newRolesPlugins.split(',').map(item => item.trim()).filter(Boolean);
+        }
+        // 老 schema 兼容
+        const oldRaw = this._pluginConfig?.role_plugin_bindings?.[role];
+        if (typeof oldRaw === 'string' && oldRaw.trim()) {
+            return oldRaw.split(',').map(item => item.trim()).filter(Boolean);
+        }
+        return [];
     }
 
     _extractJsonObjectFromLlmText(raw) {
         if (!raw || typeof raw !== 'string') throw new Error('空输出');
-        let s = raw.trim();
+        // 先剥离开头的思考片段（若有 --- 分隔则取分隔后的部分；sub-agent 的 run() 已经把思考片段日志打印过）
+        let s = SubAgent.stripThinkingSnippet(raw).trim();
         const codeBlockMatch = s.match(/```(?:json)?\s*([\s\S]*?)```/);
         if (codeBlockMatch) s = codeBlockMatch[1].trim();
         const start = s.indexOf('{');
@@ -2451,8 +3770,9 @@ class WorldEyePlugin extends Plugin {
             '- 用户只说了「保存」但若主体是生成视频/图，仍选对应生成类插件，不要仅因「保存」选 file。',
             suggestionBlock,
             '',
-            '## 输出格式',
-            '严格输出**一个** JSON 对象，不要 markdown、不要解释。字段如下：',
+            '## 输出格式（两段式）',
+            '第 1 段（可选，≤ 1 句话）：用你"冷静速判"的方式写下当下判断。例如：「截屏+发帖明显多步骤，走 planned_composite」。',
+            '第 2 段（必需）：用单独一行 "---" 分隔后，输出严格的**一个** JSON 对象（不要 markdown 代码块、不要 ```json、不要其他文字）。字段如下：',
             '{',
             '  "workflow": "research" | "planned_composite" | "composite" | "delegate",',
             '  "composite_template": "模板 id 或 null",',
@@ -2506,7 +3826,8 @@ class WorldEyePlugin extends Plugin {
             role: 'router',
             taskDescription: prompt,
             toolDefinitions: [],
-            signal: AbortSignal.timeout(45000),
+            // 路由器只输出 JSON，prompt 较短；与规划器同样尊重用户配置（上限 90s）
+            signal: AbortSignal.timeout(Math.min(90000, Math.max(20000, this._getConfiguredLlmTimeoutMs()))),
             workerLabel: 'goal-router',
             isTemporaryWorker: true,
             maxIterations: 1,
@@ -2777,14 +4098,41 @@ class WorldEyePlugin extends Plugin {
     }
 
     _wrapResult(title, taskDescription, result) {
+        const sanitized = this._sanitizePersonaArtifacts(result);
         return [
             `【世界之眼·${title}】`,
             `任务: ${taskDescription}`,
             '',
-            result,
+            sanitized,
             '',
-            '——以上为世界之眼执行结果。请根据结果内容自然回复用户，不要复述报告标签。',
+            '——以上为世界之眼执行结果。请根据结果内容自然回复用户，**不要**复述报告标签，**不要**提及世界之眼/任何内部 agent 名/动漫人物名/作品名（这些只是内部协作概念）。',
         ].join('\n');
+    }
+
+    /**
+     * 剥离最终结果中的「思考片段」「handoff 信件」「【返回上游】」「【内心独白】」等内部协作语料，
+     * 主 LLM 只应看到事实层。
+     */
+    _sanitizePersonaArtifacts(content) {
+        if (!content || typeof content !== 'string') return content;
+        let s = content;
+
+        // 1. 移除最开头的「思考片段 + ---」块（只移除第一次出现）
+        s = s.replace(/^[\s\S]*?\n\s*---\s*\n/, '');
+
+        // 2. 移除 handoff 信件块 「## 来自 X · YYY（ZZZ）的交接 ... 直到下一个 ## 或末尾」
+        s = s.replace(/##\s*来自[\s\S]*?(?=\n##\s|$)/g, '').trim();
+
+        // 3. 移除残留的【内心独白】（旧版兼容）
+        s = s.replace(/【内心独白】[\s\S]*?---\s*\n?/g, '').trim();
+
+        // 4. 移除任何残留的 【返回上游】 块
+        s = s.replace(/【返回上游】[\s\S]*?(?=\n##\s|$)/g, '').trim();
+
+        // 5. 移除残留的角色名信号（保守做法：只移除 emoji+shortName 单独成行的标题，不动正文）
+        s = s.replace(/^\s*[♟️⚔️🔍❄️📖⚗️🌸💻🎹🎨🎬📚🛡️🥷💤]\s*\S{1,8}\s*$/gm, '').trim();
+
+        return s || content;
     }
 
     _formatTaskStatus(task) {
@@ -2798,6 +4146,9 @@ class WorldEyePlugin extends Plugin {
             `已运行: ${elapsed}s`,
             `子任务数: ${task.subtasks.length}`,
             task.meta?.queueReason ? `排队原因: ${task.meta.queueReason}` : '',
+            task.status === TASK_STATUS.WAITING_INPUT && task.meta?.blockReason
+                ? `受阻原因: ${task.meta.blockReason}（用 world_eye_control 的 answer 动作补充信息可续跑）`
+                : '',
             task.meta?.archivePath ? `归档: ${task.meta.archivePath}` : '',
         ].filter(Boolean).join('\n');
     }
